@@ -1,0 +1,11 @@
+# Large files
+checkpoint_epoch5.pt
+dataset/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
