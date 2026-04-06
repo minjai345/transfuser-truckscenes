@@ -4,8 +4,8 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
-from transfuser.transfuser_config import TransfuserConfig
-from transfuser.enums import BoundingBox2DIndex
+from model.config import TransfuserConfig
+from model.enums import BoundingBox2DIndex
 
 
 def transfuser_loss(targets: Dict[str, torch.Tensor], predictions: Dict[str, torch.Tensor], config: TransfuserConfig):

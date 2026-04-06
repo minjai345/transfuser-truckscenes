@@ -1,6 +1,6 @@
 # Large files
 checkpoint_epoch5.pt
-dataset/
+data/
 
 # Python
 __pycache__/

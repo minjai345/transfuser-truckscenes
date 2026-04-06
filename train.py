@@ -8,10 +8,10 @@ import time
 import torch
 from torch.utils.data import DataLoader
 
-from transfuser.transfuser_config import TransfuserConfig
-from transfuser.transfuser_model import TransfuserModel
-from transfuser.transfuser_loss import transfuser_loss
-from transfuser.dataset import TruckScenesDataset
+from model.config import TransfuserConfig
+from model.model import TransfuserModel
+from model.loss import transfuser_loss
+from dataset.dataset import TruckScenesDataset
 
 
 def collate_fn(batch):

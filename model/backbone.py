@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from transfuser.transfuser_config import TransfuserConfig
+from model.config import TransfuserConfig
 
 
 class TransfuserBackbone(nn.Module):

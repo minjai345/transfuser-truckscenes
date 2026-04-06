@@ -4,9 +4,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from transfuser.transfuser_backbone import TransfuserBackbone
-from transfuser.transfuser_config import TransfuserConfig
-from transfuser.enums import BoundingBox2DIndex, StateSE2Index
+from model.backbone import TransfuserBackbone
+from model.config import TransfuserConfig
+from model.enums import BoundingBox2DIndex, StateSE2Index
 
 
 class TransfuserModel(nn.Module):

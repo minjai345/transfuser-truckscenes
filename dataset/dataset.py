@@ -16,8 +16,8 @@ from pyquaternion import Quaternion
 
 from truckscenes.utils.data_classes import LidarPointCloud
 
-from transfuser.transfuser_config import TransfuserConfig
-from transfuser.enums import BoundingBox2DIndex
+from model.config import TransfuserConfig
+from model.enums import BoundingBox2DIndex
 
 
 # TruckScenes camera channel names with crop strategy.
