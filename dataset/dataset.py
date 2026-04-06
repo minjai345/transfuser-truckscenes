@@ -217,23 +217,12 @@ class TruckScenesDataset(Dataset):
         return torch.tensor(features)
 
     def _get_status_feature(self, sample: dict) -> torch.Tensor:
-        """
-        Construct ego status feature: [driving_command(4), velocity(2), acceleration(2)].
-        TruckScenes doesn't have driving_command, so we use a dummy one-hot [1,0,0,0].
-        Velocity/acceleration from CAN data (ego_motion_chassis).
-        """
+        """Construct ego status feature: [vx, vy, ax, ay] from CAN data."""
         lidar_channel = _get_reference_channel(sample)
         sd = self._ts.get("sample_data", sample["data"][lidar_channel])
 
-        # Get velocity and acceleration from CAN bus data
         chassis = self._ts.getclosest("ego_motion_chassis", sd["timestamp"])
-        vx, vy = chassis["vx"], chassis["vy"]
-        ax, ay = chassis["ax"], chassis["ay"]
-
-        # Dummy driving command: forward (one-hot)
-        driving_command = [1.0, 0.0, 0.0, 0.0]
-
-        status = driving_command + [vx, vy] + [ax, ay]
+        status = [chassis["vx"], chassis["vy"], chassis["ax"], chassis["ay"]]
         return torch.tensor(status, dtype=torch.float32)
 
     def _get_trajectory_target(self, sample: dict) -> torch.Tensor:

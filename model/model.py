@@ -27,7 +27,7 @@ class TransfuserModel(nn.Module):
         self._query_embedding = nn.Embedding(sum(self._query_splits), config.tf_d_model)
 
         self._bev_downscale = nn.Conv2d(512, config.tf_d_model, kernel_size=1)
-        self._status_encoding = nn.Linear(4 + 2 + 2, config.tf_d_model)
+        self._status_encoding = nn.Linear(4, config.tf_d_model)
 
         self._bev_semantic_head = nn.Sequential(
             nn.Conv2d(

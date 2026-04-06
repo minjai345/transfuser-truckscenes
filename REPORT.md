@@ -96,10 +96,11 @@ TruckScenes DB → TruckScenes devkit API
 
 | 항목 | NAVSIM (원본) | TruckScenes (변경) |
 |---|---|---|
-| driving_command | pickle에 포함 (정수 → one-hot 4D) | 미제공 → dummy [1,0,0,0] 사용 |
-| velocity (vx, vy) | pickle의 `ego_dynamic_state`에서 직접 로드 | 연속 프레임 ego pose의 수치 미분으로 계산 |
-| acceleration (ax, ay) | pickle의 `ego_dynamic_state`에서 직접 로드 | 현재 dummy [0,0] (추후 2차 미분 추가 가능) |
-| 좌표계 | global frame에서 제공 | global ego pose에서 계산 |
+| driving_command | pickle에 포함 (정수 → one-hot 4D) | **제거** (TruckScenes 미제공, 모델 입력에서 삭제) |
+| velocity (vx, vy) | pickle의 `ego_dynamic_state`에서 직접 로드 | CAN 데이터 (`ego_motion_chassis`)에서 직접 로드 |
+| acceleration (ax, ay) | pickle의 `ego_dynamic_state`에서 직접 로드 | CAN 데이터 (`ego_motion_chassis`)에서 직접 로드 |
+| status 차원 | 8D (driving_cmd 4 + vel 2 + acc 2) | **4D** (vx, vy, ax, ay) |
+| 좌표계 | global frame에서 제공 | CAN bus (차체 기준) |
 
 ---
 
@@ -193,14 +194,16 @@ import 경로만 `navsim.agents.transfuser.*` → `transfuser.*`로 변경.
 
 ```
 transfuser-truckscenes/
-├── transfuser/
-│   ├── enums.py                 # StateSE2Index, BoundingBox2DIndex (nuPlan 대체)
-│   ├── transfuser_config.py     # TruckScenes 맞춤 설정
-│   ├── transfuser_model.py      # 모델 (아키텍처 동일, import만 변경)
-│   ├── transfuser_backbone.py   # 백본 (동일, import만 변경)
-│   └── transfuser_loss.py       # Loss (BEV semantic 조건부 비활성화)
-├── data/
+├── model/
+│   ├── backbone.py              # 백본 (동일, import만 변경)
+│   ├── model.py                 # 모델 (driving_command 제거, import 변경)
+│   ├── loss.py                  # Loss (BEV semantic 조건부 비활성화)
+│   ├── config.py                # TruckScenes 맞춤 설정
+│   └── enums.py                 # StateSE2Index, BoundingBox2DIndex (nuPlan 대체)
+├── dataset/
 │   └── dataset.py               # TruckScenes devkit 기반 Dataset (신규)
+├── data/
+│   └── man-truckscenes/         # TruckScenes 데이터 (git 미추적)
 ├── train.py                     # 학습/sanity check 스크립트 (신규)
 └── requirements.txt
 ```
