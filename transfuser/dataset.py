@@ -220,26 +220,15 @@ class TruckScenesDataset(Dataset):
         """
         Construct ego status feature: [driving_command(4), velocity(2), acceleration(2)].
         TruckScenes doesn't have driving_command, so we use a dummy one-hot [1,0,0,0].
-        Velocity/acceleration are computed from ego poses.
+        Velocity/acceleration from CAN data (ego_motion_chassis).
         """
-        # Get ego pose for current and adjacent samples
         lidar_channel = _get_reference_channel(sample)
         sd = self._ts.get("sample_data", sample["data"][lidar_channel])
-        ego_pose = self._ts.get("ego_pose", sd["ego_pose_token"])
 
-        # Compute velocity from consecutive poses
-        vx, vy = 0.0, 0.0
-        ax, ay = 0.0, 0.0
-
-        if sample.get("prev", ""):
-            prev_sample = self._ts.get("sample", sample["prev"])
-            prev_sd = self._ts.get("sample_data", prev_sample["data"][lidar_channel])
-            prev_ego = self._ts.get("ego_pose", prev_sd["ego_pose_token"])
-            dt = (sd["timestamp"] - prev_sd["timestamp"]) / 1e6  # microseconds to seconds
-            if dt > 0:
-                dx = ego_pose["translation"][0] - prev_ego["translation"][0]
-                dy = ego_pose["translation"][1] - prev_ego["translation"][1]
-                vx, vy = dx / dt, dy / dt
+        # Get velocity and acceleration from CAN bus data
+        chassis = self._ts.getclosest("ego_motion_chassis", sd["timestamp"])
+        vx, vy = chassis["vx"], chassis["vy"]
+        ax, ay = chassis["ax"], chassis["ay"]
 
         # Dummy driving command: forward (one-hot)
         driving_command = [1.0, 0.0, 0.0, 0.0]
