@@ -20,12 +20,14 @@ from transfuser.transfuser_config import TransfuserConfig
 from transfuser.enums import BoundingBox2DIndex
 
 
-# TruckScenes camera channel names (left-front, right-front, left-back, right-back)
+# TruckScenes camera channel names with crop strategy.
+# Front cameras: directional crop to keep outer field-of-view.
+# Back cameras: no crop (limited overlap between left/right back).
 CAMERA_CHANNELS = [
-    "CAMERA_LEFT_FRONT",
-    "CAMERA_RIGHT_FRONT",
-    "CAMERA_LEFT_BACK",
-    "CAMERA_RIGHT_BACK",
+    ("CAMERA_LEFT_FRONT", "left"),      # keep left, crop right
+    ("CAMERA_RIGHT_FRONT", "right"),    # keep right, crop left
+    ("CAMERA_LEFT_BACK", None),         # no crop
+    ("CAMERA_RIGHT_BACK", None),        # no crop
 ]
 
 # All LiDAR channels to merge
@@ -130,15 +132,16 @@ class TruckScenesDataset(Dataset):
         return features, targets
 
     def _get_camera_feature(self, sample: dict) -> torch.Tensor:
-        """Load 4 cameras, center-crop to 1.5:1, stitch, resize."""
+        """Load 4 cameras, crop front pair directionally, stitch, resize."""
         images = []
-        for channel in CAMERA_CHANNELS:
+        for channel, crop_side in CAMERA_CHANNELS:
             cam_token = sample["data"][channel]
             cam_data = self._ts.get("sample_data", cam_token)
             img_path = Path(self._ts.dataroot) / cam_data["filename"]
             img = cv2.imread(str(img_path))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = _center_crop_to_aspect(img, 1.5)
+            if crop_side is not None:
+                img = _crop_to_aspect(img, 1.5, crop_side)
             images.append(img)
 
         stitched = np.concatenate(images, axis=1)
@@ -344,15 +347,29 @@ class TruckScenesDataset(Dataset):
         return torch.tensor(agent_states), torch.tensor(agent_labels)
 
 
-def _center_crop_to_aspect(image: npt.NDArray[np.uint8], aspect_ratio: float) -> npt.NDArray[np.uint8]:
-    """Center-crop image to target aspect ratio."""
+def _crop_to_aspect(
+    image: npt.NDArray[np.uint8],
+    aspect_ratio: float,
+    side: str = "center",
+) -> npt.NDArray[np.uint8]:
+    """Crop image to target aspect ratio.
+
+    Args:
+        side: Which side to keep. "left" crops right, "right" crops left,
+              "center" crops both sides equally.
+    """
     height, width = image.shape[:2]
     current_aspect = width / float(height)
 
     if current_aspect > aspect_ratio:
         crop_width = int(round(height * aspect_ratio))
-        left = (width - crop_width) // 2
-        return image[:, left: left + crop_width]
+        if side == "left":
+            return image[:, :crop_width]
+        elif side == "right":
+            return image[:, width - crop_width:]
+        else:
+            left = (width - crop_width) // 2
+            return image[:, left: left + crop_width]
 
     crop_height = int(round(width / aspect_ratio))
     top = (height - crop_height) // 2
@@ -367,7 +384,7 @@ def _get_reference_channel(sample: dict) -> str:
         if "LIDAR" in key.upper():
             return key
     # Fallback to first camera
-    return CAMERA_CHANNELS[0]
+    return CAMERA_CHANNELS[0][0]
 
 
 def _quaternion_to_yaw(q: Quaternion) -> float:

@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from transfuser.transfuser_config import TransfuserConfig
 from transfuser.transfuser_model import TransfuserModel
 from transfuser.transfuser_loss import transfuser_loss
-from data.dataset import TruckScenesDataset
+from transfuser.dataset import TruckScenesDataset
 
 
 def collate_fn(batch):
