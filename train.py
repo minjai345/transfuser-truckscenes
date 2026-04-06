@@ -61,6 +61,7 @@ def train(args):
     # Model
     model = TransfuserModel(config=config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {num_params:,}")
@@ -97,9 +98,10 @@ def train(args):
                     f"Loss: {loss.item():.4f}"
                 )
 
+        scheduler.step()
         avg_loss = epoch_loss / max(len(dataloader), 1)
         elapsed = time.time() - epoch_start
-        print(f"Epoch {epoch+1}/{args.epochs} done | Avg Loss: {avg_loss:.4f} | Time: {elapsed:.1f}s")
+        print(f"Epoch {epoch+1}/{args.epochs} done | Avg Loss: {avg_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f} | Time: {elapsed:.1f}s")
 
         # Save checkpoint
         if (epoch + 1) % args.save_interval == 0:

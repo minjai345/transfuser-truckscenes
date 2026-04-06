@@ -281,15 +281,15 @@ class TruckScenesDataset(Dataset):
         sd = self._ts.get("sample_data", sample["data"][lidar_channel])
         boxes = self._ts.get_boxes(sd["token"])
 
+        ego_pose = self._ts.get("ego_pose", sd["ego_pose_token"])
+        ego_pos = np.array(ego_pose["translation"])
+        ego_rot = Quaternion(ego_pose["rotation"])
+        ego_yaw = _quaternion_to_yaw(ego_rot)
+
         agent_states_list = []
         for box in boxes:
             if box.name.split(".")[0] not in VEHICLE_CATEGORIES:
                 continue
-
-            # box.center is in global frame, transform to ego
-            ego_pose = self._ts.get("ego_pose", sd["ego_pose_token"])
-            ego_pos = np.array(ego_pose["translation"])
-            ego_rot = Quaternion(ego_pose["rotation"])
 
             # Transform box center to ego frame
             center = box.center - ego_pos
@@ -303,7 +303,6 @@ class TruckScenesDataset(Dataset):
 
             # Box heading in ego frame
             box_yaw = _quaternion_to_yaw(box.orientation)
-            ego_yaw = _quaternion_to_yaw(ego_rot)
             heading = box_yaw - ego_yaw
             heading = (heading + np.pi) % (2 * np.pi) - np.pi
 

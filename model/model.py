@@ -100,10 +100,11 @@ class TransfuserModel(nn.Module):
         query = self._query_embedding.weight[None, ...].repeat(batch_size, 1, 1)
         query_out = self._tf_decoder(query, keyval)
 
-        bev_semantic_map = self._bev_semantic_head(bev_feature_upscale)
         trajectory_query, agents_query = query_out.split(self._query_splits, dim=1)
 
-        output: Dict[str, torch.Tensor] = {"bev_semantic_map": bev_semantic_map}
+        output: Dict[str, torch.Tensor] = {}
+        if self._config.bev_semantic_weight > 0:
+            output["bev_semantic_map"] = self._bev_semantic_head(bev_feature_upscale)
         trajectory = self._trajectory_head(trajectory_query)
         output.update(trajectory)
 
