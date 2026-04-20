@@ -21,6 +21,16 @@ except ImportError:
     wandb = None
 
 
+def _format_eta(seconds: float) -> str:
+    """초 단위를 h:mm:ss / m:ss로 포맷."""
+    seconds = int(max(seconds, 0))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m{s:02d}s"
+    return f"{m}m{s:02d}s"
+
+
 def collate_fn(batch):
     """Custom collate: stack features and targets separately."""
     features_list, targets_list = zip(*batch)
@@ -129,10 +139,21 @@ def train(args):
             global_step += 1
 
             if batch_idx % args.log_interval == 0:
+                # ETA 계산: 이번 epoch 평균 배치 시간 기반
+                batches_done = batch_idx + 1
+                epoch_elapsed = time.time() - epoch_start
+                batch_time = epoch_elapsed / batches_done
+                eta_epoch = batch_time * (len(dataloader) - batches_done)
+                # 전체 ETA: 남은 배치 + 남은 에폭
+                remaining_batches = (len(dataloader) - batches_done) + (args.epochs - epoch - 1) * len(dataloader)
+                eta_total = batch_time * remaining_batches
                 print(
                     f"  Epoch {epoch+1}/{args.epochs} "
                     f"[{batch_idx}/{len(dataloader)}] "
-                    f"Loss: {loss.item():.4f}"
+                    f"Loss: {loss.item():.4f} | "
+                    f"{batch_time:.2f}s/it | "
+                    f"ETA epoch: {_format_eta(eta_epoch)} | "
+                    f"total: {_format_eta(eta_total)}"
                 )
                 # 배치 단위 loss + lr 로깅
                 if use_wandb:
