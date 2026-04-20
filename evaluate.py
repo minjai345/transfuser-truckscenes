@@ -114,82 +114,94 @@ def _check_collision(ego_pose, ego_length, ego_width, agent_boxes):
     return False
 
 
-def evaluate(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+def run_evaluation(
+    model,
+    ts,
+    dataset,
+    config,
+    device,
+    ego_length: float = 6.9,
+    ego_width: float = 2.5,
+    log_interval: int = 50,
+    verbose: bool = True,
+):
+    """Run L2 + collision evaluation on a dataset. Returns metrics dict.
 
-    config = TransfuserConfig()
-
-    # Pose indices for each evaluation horizon
-    # Poses at 0.5s intervals: index 0=0.5s, 1=1.0s, 2=1.5s, 3=2.0s, 4=2.5s, 5=3.0s, ...
+    학습 루프에서도 호출 가능하도록 모델/데이터셋을 인자로 받는 형태.
+    반환값: {"l2/1s": x, "l2/2s": x, "l2/3s": x, "l2/avg": x,
+             "col/1s": x, "col/2s": x, "col/3s": x, "col/avg": x}
+    """
+    # Pose indices for each evaluation horizon (0.5s 간격이면 1s→idx 1, 2s→idx 3, 3s→idx 5)
     horizon_indices = {
         h: int(h / config.trajectory_sampling_interval) - 1 for h in EVAL_HORIZONS
     }
-
-    # Load TruckScenes
-    from truckscenes.truckscenes import TruckScenes
-
-    print(f"Loading TruckScenes {args.version} from {args.dataroot}...")
-    ts = TruckScenes(version=args.version, dataroot=args.dataroot, verbose=True)
-
-    # Dataset
-    dataset = TruckScenesDataset(
-        ts=ts, config=config, num_future_samples=config.num_poses,
-    )
-
-    # Load model
-    model = TransfuserModel(config=config).to(device)
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-    model.eval()
-    print(
-        f"Loaded checkpoint: {args.checkpoint} "
-        f"(epoch {checkpoint.get('epoch', '?')})"
-    )
 
     # Metrics accumulators
     l2_errors = {h: [] for h in EVAL_HORIZONS}
     collisions = {h: [] for h in EVAL_HORIZONS}
 
     num_samples = len(dataset)
-    print(f"Evaluating {num_samples} samples...")
+    if verbose:
+        print(f"Evaluating {num_samples} samples...")
 
-    with torch.no_grad():
-        for i in range(num_samples):
-            features, targets = dataset[i]
-            sample_token = dataset._sample_tokens[i]
+    # 기존 모드를 저장해서 끝나면 복원 (학습 루프에서 eval→train 전환 시 중요)
+    prev_mode = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for i in range(num_samples):
+                features, targets = dataset[i]
+                sample_token = dataset._sample_tokens[i]
 
-            # Single-sample forward pass
-            features_batch = {k: v.unsqueeze(0).to(device) for k, v in features.items()}
-            predictions = model(features_batch)
+                features_batch = {k: v.unsqueeze(0).to(device) for k, v in features.items()}
+                predictions = model(features_batch)
 
-            pred_traj = predictions["trajectory"][0].cpu().numpy()  # (8, 3)
-            gt_traj = targets["trajectory"].numpy()  # (8, 3)
+                pred_traj = predictions["trajectory"][0].cpu().numpy()  # (8, 3)
+                gt_traj = targets["trajectory"].numpy()  # (8, 3)
 
-            for h in EVAL_HORIZONS:
-                idx = horizon_indices[h]
+                for h in EVAL_HORIZONS:
+                    idx = horizon_indices[h]
 
-                # L2 displacement error (x, y only)
-                l2 = np.linalg.norm(pred_traj[idx, :2] - gt_traj[idx, :2])
-                l2_errors[h].append(l2)
+                    l2 = np.linalg.norm(pred_traj[idx, :2] - gt_traj[idx, :2])
+                    l2_errors[h].append(l2)
 
-                # Collision check
-                agent_boxes = _get_future_agent_boxes(ts, sample_token, idx, config)
-                collision = _check_collision(
-                    pred_traj[idx], args.ego_length, args.ego_width, agent_boxes,
-                )
-                collisions[h].append(float(collision))
+                    agent_boxes = _get_future_agent_boxes(ts, sample_token, idx, config)
+                    collision = _check_collision(
+                        pred_traj[idx], ego_length, ego_width, agent_boxes,
+                    )
+                    collisions[h].append(float(collision))
 
-            if (i + 1) % args.log_interval == 0:
-                print(f"  [{i + 1}/{num_samples}]")
+                if verbose and (i + 1) % log_interval == 0:
+                    print(f"  [{i + 1}/{num_samples}]")
+    finally:
+        model.train(prev_mode)
 
-    # === Print results ===
+    # 결과 집계
+    metrics = {}
+    l2_means = []
+    col_means = []
+    for h in EVAL_HORIZONS:
+        l2_m = float(np.mean(l2_errors[h])) if l2_errors[h] else float("nan")
+        col_m = float(np.mean(collisions[h])) * 100 if collisions[h] else float("nan")
+        metrics[f"l2/{int(h)}s"] = l2_m
+        metrics[f"col/{int(h)}s"] = col_m
+        l2_means.append(l2_m)
+        col_means.append(col_m)
+    metrics["l2/avg"] = float(np.mean(l2_means))
+    metrics["col/avg"] = float(np.mean(col_means))
+
+    if verbose:
+        _print_results(metrics)
+
+    return metrics
+
+
+def _print_results(metrics):
+    """Pretty-print evaluation metrics."""
     print("\n" + "=" * 55)
     print("Evaluation Results")
     print("=" * 55)
 
-    # L2 table
-    avg_l2 = []
     print("\nL2 (m) ", end="")
     for h in EVAL_HORIZONS:
         print(f"| {h:.0f}s     ", end="")
@@ -197,13 +209,9 @@ def evaluate(args):
     print("-" * 55)
     print("       ", end="")
     for h in EVAL_HORIZONS:
-        mean = np.mean(l2_errors[h])
-        avg_l2.append(mean)
-        print(f"| {mean:<7.2f}", end="")
-    print(f"| {np.mean(avg_l2):.2f}")
+        print(f"| {metrics[f'l2/{int(h)}s']:<7.2f}", end="")
+    print(f"| {metrics['l2/avg']:.2f}")
 
-    # Collision table
-    avg_col = []
     print("\nCol (%) ", end="")
     for h in EVAL_HORIZONS:
         print(f"| {h:.0f}s     ", end="")
@@ -211,12 +219,52 @@ def evaluate(args):
     print("-" * 55)
     print("       ", end="")
     for h in EVAL_HORIZONS:
-        mean = np.mean(collisions[h]) * 100
-        avg_col.append(mean)
-        print(f"| {mean:<7.2f}", end="")
-    print(f"| {np.mean(avg_col):.2f}")
-
+        print(f"| {metrics[f'col/{int(h)}s']:<7.2f}", end="")
+    print(f"| {metrics['col/avg']:.2f}")
     print()
+
+
+def evaluate(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    config = TransfuserConfig()
+
+    from truckscenes.truckscenes import TruckScenes
+    print(f"Loading TruckScenes {args.version} from {args.dataroot}...")
+    ts = TruckScenes(version=args.version, dataroot=args.dataroot, verbose=True)
+
+    # 평가는 공식 val split 사용
+    from truckscenes.utils.splits import create_splits_scenes
+    val_scene_names = set(create_splits_scenes()["val"])
+    val_scene_tokens = [s["token"] for s in ts.scene if s["name"] in val_scene_names]
+    print(f"Val split: {len(val_scene_tokens)} scenes")
+
+    dataset = TruckScenesDataset(
+        ts=ts, config=config, num_future_samples=config.num_poses,
+        split_tokens=val_scene_tokens,
+    )
+
+    # Load model
+    model = TransfuserModel(config=config).to(device)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    print(
+        f"Loaded checkpoint: {args.checkpoint} "
+        f"(epoch {checkpoint.get('epoch', '?')})"
+    )
+
+    run_evaluation(
+        model=model,
+        ts=ts,
+        dataset=dataset,
+        config=config,
+        device=device,
+        ego_length=args.ego_length,
+        ego_width=args.ego_width,
+        log_interval=args.log_interval,
+        verbose=True,
+    )
 
 
 if __name__ == "__main__":
