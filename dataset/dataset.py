@@ -40,17 +40,10 @@ LIDAR_CHANNELS = [
     "LIDAR_REAR",
 ]
 
-# TruckScenes object categories to treat as "vehicle"
-VEHICLE_CATEGORIES = {
-    "car",
-    "truck",
-    "bus",
-    "trailer",
-    "construction_vehicle",
-    "emergency_vehicle",
-    "motorcycle",
-    "bicycle",
-}
+# TruckScenes 카테고리는 'vehicle.car', 'vehicle.bus.bendy'처럼 계층형 문자열.
+# "vehicle.*" 로 시작하면 모두 vehicle로 취급하되, ego 자체(vehicle.ego_trailer)는 제외.
+def _is_vehicle_category(name: str) -> bool:
+    return name.startswith("vehicle.") and name != "vehicle.ego_trailer"
 
 
 class TruckScenesDataset(Dataset):
@@ -288,7 +281,7 @@ class TruckScenesDataset(Dataset):
 
         agent_states_list = []
         for box in boxes:
-            if box.name.split(".")[0] not in VEHICLE_CATEGORIES:
+            if not _is_vehicle_category(box.name):
                 continue
 
             # Transform box center to ego frame

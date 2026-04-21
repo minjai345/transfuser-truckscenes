@@ -15,7 +15,7 @@ from model.config import TransfuserConfig
 from model.model import TransfuserModel
 from dataset.dataset import (
     TruckScenesDataset,
-    VEHICLE_CATEGORIES,
+    _is_vehicle_category,
     _get_reference_channel,
     _quaternion_to_yaw,
 )
@@ -75,7 +75,7 @@ def _get_future_agent_boxes(ts, sample_token, step, config):
 
     agent_boxes = []
     for box in boxes:
-        if box.name.split(".")[0] not in VEHICLE_CATEGORIES:
+        if not _is_vehicle_category(box.name):
             continue
 
         # box.center is in global frame
