@@ -3,7 +3,11 @@ Training script for TransFuser on MAN TruckScenes.
 """
 
 import argparse
+import json
+import sys
 import time
+from datetime import datetime
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -31,6 +35,51 @@ def _format_eta(seconds: float) -> str:
     return f"{m}m{s:02d}s"
 
 
+class _Tee:
+    """stdout을 파일에도 동시에 기록 (tee 없이 동작하도록)."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, msg):
+        for s in self.streams:
+            s.write(msg)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+def _setup_work_dir(args) -> Path:
+    """work_dirs/<name>/ 구조 생성. 이름 없으면 타임스탬프 + run_name."""
+    # 우선순위: --work_dir 명시 > (wandb_run_name or "run") + 타임스탬프
+    if args.work_dir is not None:
+        work_dir = Path(args.work_dir)
+    else:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        name = args.wandb_run_name or "run"
+        work_dir = Path("work_dirs") / f"{name}_{ts}"
+
+    (work_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    (work_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (work_dir / "wandb").mkdir(parents=True, exist_ok=True)
+
+    # 실행 config를 저장 (재현성용)
+    with open(work_dir / "args.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
+
+    # stdout/stderr을 로그 파일에도 기록
+    log_path = work_dir / "logs" / f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_file = open(log_path, "w")
+    sys.stdout = _Tee(sys.__stdout__, log_file)
+    sys.stderr = _Tee(sys.__stderr__, log_file)
+
+    print(f"Work dir: {work_dir}")
+    print(f"Log file: {log_path}")
+    return work_dir
+
+
 def collate_fn(batch):
     """Custom collate: stack features and targets separately."""
     features_list, targets_list = zip(*batch)
@@ -47,6 +96,9 @@ def collate_fn(batch):
 
 
 def train(args):
+    # work_dirs/<name>/ 구조 준비 (체크포인트 + 로그 + wandb + args.json)
+    work_dir = _setup_work_dir(args)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -62,6 +114,7 @@ def train(args):
             project=args.wandb_project,
             name=args.wandb_run_name,
             config=vars(args),
+            dir=str(work_dir),  # wandb 로컬 파일도 work_dir 아래에 저장
         )
 
     # Initialize TruckScenes
@@ -205,9 +258,9 @@ def train(args):
                 step=global_step,
             )
 
-        # Save checkpoint
+        # Save checkpoint (work_dir/checkpoints/)
         if (epoch + 1) % args.save_interval == 0:
-            ckpt_path = f"checkpoint_epoch{epoch+1}.pt"
+            ckpt_path = work_dir / "checkpoints" / f"epoch{epoch+1}.pt"
             torch.save({
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
@@ -288,6 +341,9 @@ if __name__ == "__main__":
     parser.add_argument("--log_interval", type=int, default=5)
     parser.add_argument("--save_interval", type=int, default=1)
     parser.add_argument("--sanity", action="store_true", help="Run sanity check only")
+    # Work dir (checkpoint + log + wandb + args.json 저장 위치)
+    parser.add_argument("--work_dir", type=str, default=None,
+                        help="Run 디렉토리. 미지정 시 work_dirs/<name>_<timestamp>/")
     # Validation (매 epoch 끝에 실행)
     parser.add_argument("--ego_length", type=float, default=6.9, help="Ego vehicle length (m)")
     parser.add_argument("--ego_width", type=float, default=2.5, help="Ego vehicle width (m)")
