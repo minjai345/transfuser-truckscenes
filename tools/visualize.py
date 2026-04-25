@@ -21,10 +21,56 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pyquaternion import Quaternion
+
 from model.config import TransfuserConfig
 from model.model import TransfuserModel
 from model.enums import BoundingBox2DIndex
-from dataset.dataset import TruckScenesDataset
+from dataset.dataset import (
+    TruckScenesDataset,
+    _is_vehicle_category,
+    _get_reference_channel,
+    _quaternion_to_yaw,
+)
+
+
+def _short_category(name: str) -> str:
+    """vehicle.bus.bendy → bus, vehicle.car → car (시각화용 짧은 라벨)."""
+    parts = name.split(".")
+    return parts[1] if len(parts) >= 2 else name
+
+
+def _get_gt_boxes_with_category(ts, sample_token, config):
+    """현재 sample의 vehicle box를 ego frame에서 (x, y, h, L, W, category)로 반환.
+    dataset.py의 _get_agent_targets와 동일한 필터/정렬 적용 — 카테고리 정보까지 포함."""
+    sample = ts.get("sample", sample_token)
+    lidar_channel = _get_reference_channel(sample)
+    sd = ts.get("sample_data", sample["data"][lidar_channel])
+    boxes = ts.get_boxes(sd["token"])
+
+    ego_pose = ts.get("ego_pose", sd["ego_pose_token"])
+    ego_pos = np.array(ego_pose["translation"])
+    ego_rot = Quaternion(ego_pose["rotation"])
+    ego_yaw = _quaternion_to_yaw(ego_rot)
+
+    items = []
+    for box in boxes:
+        if not _is_vehicle_category(box.name):
+            continue
+        center = box.center - ego_pos
+        center = ego_rot.inverse.rotate(center)
+        x, y = float(center[0]), float(center[1])
+        if not (config.lidar_min_x <= x <= config.lidar_max_x and
+                config.lidar_min_y <= y <= config.lidar_max_y):
+            continue
+        box_yaw = _quaternion_to_yaw(box.orientation)
+        h = (box_yaw - ego_yaw + np.pi) % (2 * np.pi) - np.pi
+        length, width = float(box.wlh[1]), float(box.wlh[0])
+        items.append((x, y, float(h), length, width, _short_category(box.name)))
+
+    # 가까운 거리순으로 정렬해서 num_bounding_boxes만 유지 (dataset과 동일)
+    items.sort(key=lambda it: it[0] ** 2 + it[1] ** 2)
+    return items[: config.num_bounding_boxes]
 
 
 def _draw_bbox(ax, x, y, heading, length, width, color, label=None):
@@ -39,10 +85,13 @@ def _draw_bbox(ax, x, y, heading, length, width, color, label=None):
     ax.add_patch(poly)
 
 
-def _render_sample(sample_idx, features, targets, predictions, config, out_path):
-    """한 샘플에 대해 camera + BEV 서브플롯 생성."""
-    fig, (ax_cam, ax_bev) = plt.subplots(1, 2, figsize=(20, 8),
-                                          gridspec_kw={"width_ratios": [2, 1]})
+def _render_sample(sample_idx, features, targets, predictions, config, out_path,
+                   gt_categories=None):
+    """한 샘플에 대해 camera + BEV 서브플롯 생성.
+    gt_categories: agent_states 순서와 동일한 길이의 카테고리 리스트 (없으면 라벨 미표시)."""
+    # BEV가 좁으면 카테고리 라벨이 안 보여서 ratio 조정 + 전체 fig 사이즈 키움
+    fig, (ax_cam, ax_bev) = plt.subplots(1, 2, figsize=(24, 12),
+                                          gridspec_kw={"width_ratios": [1.6, 1]})
 
     # === Camera (stitched 4-view) ===
     cam = features["camera_feature"].cpu().numpy()  # (3, H, W)
@@ -57,16 +106,21 @@ def _render_sample(sample_idx, features, targets, predictions, config, out_path)
     # 첫 채널(또는 sum)을 sky view로 표시
     lidar_bg = lidar[0] if lidar.shape[0] == 1 else lidar.sum(0)
 
-    # BEV extent: ego frame에서 x는 forward, y는 left.
-    # lidar_feature는 [C, H=256, W=256], lidar_min_x~max_x / lidar_min_y~max_y 매핑.
-    # 이미지 상으로는 x축=lidar_y (좌우), y축=lidar_x (상하).
-    # 여기서는 간단히 ego-centric 좌표계 (x: forward=up, y: left=left)로 그림.
+    # BEV 좌표 변환: ego frame (+x forward, +y LEFT) → plot frame (+up, +left)
+    # 매핑: plot_x = -ego_y, plot_y = ego_x. 이는 CCW π/2 rotation이므로
+    # 모든 heading도 plot에 그릴 땐 π/2 만큼 추가 회전해야 함.
+    #
+    # lidar_feature 매트릭스는 shape (C, H=x_bins, W=y_bins):
+    #   - 축0 = ego_x (forward) → plot_y로 매핑
+    #   - 축1 = ego_y (LEFT)   → plot_x로 매핑하되 -부호 (플롯 왼쪽이 +ego_y)
+    # [:, ::-1]로 y_bins 반전 + origin="lower"로 row 0을 bottom에 두면 정렬 완료.
     extent = [config.lidar_min_y, config.lidar_max_y,
               config.lidar_min_x, config.lidar_max_x]
-    ax_bev.imshow(lidar_bg.T[::-1], extent=extent, cmap="gray_r", origin="upper", alpha=0.6)
+    ax_bev.imshow(lidar_bg[:, ::-1], extent=extent, cmap="gray_r",
+                  origin="lower", alpha=0.6)
 
-    # Ego vehicle (원점)
-    _draw_bbox(ax_bev, 0, 0, 0, 6.9, 2.5, color="blue", label="ego")
+    # Ego vehicle — heading=0 + plot 회전 π/2 → 세로로 서있는 박스로 그려짐
+    _draw_bbox(ax_bev, 0, 0, np.pi / 2, 6.9, 2.5, color="blue", label="ego")
     ax_bev.plot(0, 0, "b*", markersize=12)
 
     # GT trajectory
@@ -75,16 +129,21 @@ def _render_sample(sample_idx, features, targets, predictions, config, out_path)
     # ax_bev의 x축 = ego y (left), y축 = ego x (forward)
     ax_bev.plot(-traj_gt[:, 1], traj_gt[:, 0], "g-o", markersize=4, linewidth=2, label="GT traj")
 
-    # GT agent boxes
+    # GT agent boxes — 각 박스 위에 카테고리 라벨 표시 (없으면 인덱스)
     gt_states = targets["agent_states"].cpu().numpy()
     gt_labels = targets["agent_labels"].cpu().numpy()
+    first_valid = True
     for j in range(len(gt_labels)):
         if gt_labels[j] < 0.5:
             continue
         x, y, h, length, width = gt_states[j]
-        # Ego → BEV 변환: BEV의 x = -ego_y, BEV의 y = ego_x, heading도 반영
         _draw_bbox(ax_bev, -y, x, h + np.pi / 2, length, width,
-                   color="green", label="GT agent" if j == 0 else None)
+                   color="green", label="GT agent" if first_valid else None)
+        first_valid = False
+        # 라벨: gt_categories가 있으면 카테고리(예: "car"), 없으면 인덱스
+        text = gt_categories[j] if gt_categories and j < len(gt_categories) else f"{j}"
+        ax_bev.text(-y, x, text, fontsize=9, color="green",
+                    ha="center", va="center", fontweight="bold")
 
     # Predictions (있으면)
     if predictions is not None:
@@ -94,15 +153,18 @@ def _render_sample(sample_idx, features, targets, predictions, config, out_path)
 
         pred_states = predictions["agent_states"][0].cpu().numpy()
         pred_logits = predictions["agent_labels"][0].cpu().numpy()
-        # 확률 > 0.5인 것만
+        # logit > 0 (= confidence > 0.5)인 것만 표시 + 점수 라벨
         for j in range(len(pred_logits)):
-            if pred_logits[j] < 0:  # logit 기준
+            if pred_logits[j] < 0:
                 continue
             x, y, h = pred_states[j, BoundingBox2DIndex.X], pred_states[j, BoundingBox2DIndex.Y], pred_states[j, BoundingBox2DIndex.HEADING]
             length = pred_states[j, BoundingBox2DIndex.LENGTH]
             width = pred_states[j, BoundingBox2DIndex.WIDTH]
+            score = float(1.0 / (1.0 + np.exp(-pred_logits[j])))  # sigmoid
             _draw_bbox(ax_bev, -y, x, h + np.pi / 2, length, width,
                        color="red", label="Pred agent" if j == 0 else None)
+            ax_bev.text(-y, x, f"{score:.2f}", fontsize=9, color="red",
+                        ha="center", va="center", fontweight="bold")
 
     # Status 정보 (vx, vy, ax, ay)
     status = features["status_feature"].cpu().numpy()
@@ -120,7 +182,7 @@ def _render_sample(sample_idx, features, targets, predictions, config, out_path)
     ax_bev.legend(loc="upper right", fontsize=9)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
+    fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
 
@@ -166,8 +228,14 @@ def main(args):
                 features_batch = {k: v.unsqueeze(0).to(device) for k, v in features.items()}
                 predictions = model(features_batch)
 
+        # GT 카테고리 라벨링용 — sample token으로 raw box 다시 fetch
+        sample_token = dataset._sample_tokens[idx]
+        gt_items = _get_gt_boxes_with_category(ts, sample_token, config)
+        gt_categories = [it[5] for it in gt_items]
+
         out_path = out_dir / f"sample_{idx:05d}.png"
-        _render_sample(idx, features, targets, predictions, config, out_path)
+        _render_sample(idx, features, targets, predictions, config, out_path,
+                       gt_categories=gt_categories)
         print(f"  saved: {out_path}")
 
     print(f"\n{args.num} visualizations saved to {out_dir}/")
