@@ -18,8 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from model.config import TransfuserConfig
 from model.model import TransfuserModel
-from model.loss import transfuser_loss
+from model.loss import transfuser_loss, _agent_loss
 from dataset.dataset import TruckScenesDataset
+import torch.nn.functional as F
 
 
 def main(args):
@@ -84,10 +85,17 @@ def main(args):
 
     for it in range(args.iters):
         predictions = model(features)
-        loss = transfuser_loss(targets, predictions, config)
 
-        # trajectory L1만 별도 추적 (agent loss와 분리해서 보기 위해)
-        traj_l1 = (predictions["trajectory"] - targets["trajectory"]).abs().mean().item()
+        # component별 loss 분해 — 어느 head가 수렴 안 하는지 진단용
+        traj_l = F.l1_loss(predictions["trajectory"], targets["trajectory"])
+        agent_cls_l, agent_box_l = _agent_loss(targets, predictions, config)
+        loss = (
+            config.trajectory_weight * traj_l
+            + config.agent_class_weight * agent_cls_l
+            + config.agent_box_weight * agent_box_l
+        )
+
+        traj_l1_raw = (predictions["trajectory"] - targets["trajectory"]).abs().mean().item()
 
         optimizer.zero_grad()
         loss.backward()
@@ -95,11 +103,15 @@ def main(args):
         optimizer.step()
 
         losses.append(loss.item())
-        traj_losses.append(traj_l1)
+        traj_losses.append(traj_l1_raw)
 
         if it == 0 or (it + 1) % max(args.iters // 20, 1) == 0:
             elapsed = time.time() - start
-            print(f"  iter {it+1:4d}/{args.iters} | loss {loss.item():8.4f} | traj_L1 {traj_l1:.4f} | {elapsed:.1f}s")
+            print(
+                f"  iter {it+1:4d}/{args.iters} | loss {loss.item():8.4f} | "
+                f"traj {traj_l.item():.4f} | cls {agent_cls_l.item():.4f} | "
+                f"box {agent_box_l.item():.4f} | {elapsed:.1f}s"
+            )
 
     # === 결과 평가 ===
     initial_loss = losses[0]
