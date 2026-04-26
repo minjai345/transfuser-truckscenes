@@ -14,6 +14,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import cv2
+import matplotlib.gridspec as gridspec
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,16 +24,81 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pyquaternion import Quaternion
+from truckscenes.utils.geometry_utils import view_points
 
 from model.config import TransfuserConfig
 from model.model import TransfuserModel
 from model.enums import BoundingBox2DIndex
 from dataset.dataset import (
     TruckScenesDataset,
+    CAMERA_CHANNELS,
     _is_vehicle_category,
     _get_reference_channel,
     _quaternion_to_yaw,
 )
+
+
+def _ego_to_camera(points_ego: np.ndarray, ts, sd_token: str):
+    """Ego-frame (N,3) 점을 카메라 frame으로 변환 + 이미지로 projection.
+    반환: (proj_uv: (N,2), depth: (N,)) — depth>0인 점만 화면 앞쪽."""
+    sd = ts.get("sample_data", sd_token)
+    cs = ts.get("calibrated_sensor", sd["calibrated_sensor_token"])
+    K = np.array(cs["camera_intrinsic"])
+    cam_t = np.array(cs["translation"])
+    cam_R = Quaternion(cs["rotation"]).rotation_matrix  # ego←cam
+
+    # ego→cam: p_cam = R^T (p_ego - t). row-vector form: (p_ego - t) @ R
+    p_cam = (points_ego - cam_t) @ cam_R  # (N, 3)
+    # view_points는 column-vector 입력
+    proj = view_points(p_cam.T, K, normalize=True)  # (3, N) — u, v, 1
+    return proj[:2].T, p_cam[:, 2]
+
+
+def _box_3d_corners(x: float, y: float, heading: float, length: float, width: float,
+                     z: float = 0.0, height: float = 1.7):
+    """ego-frame box의 8 corner 3D 좌표 (N=8, 3). z는 box 중심의 ego-frame z 좌표."""
+    cos_h, sin_h = np.cos(heading), np.sin(heading)
+    hl, hw, hh = length / 2, width / 2, height / 2
+    # box-local corners (forward, left, up)
+    corners_local = np.array([
+        [+hl, +hw, +hh], [+hl, -hw, +hh], [-hl, -hw, +hh], [-hl, +hw, +hh],
+        [+hl, +hw, -hh], [+hl, -hw, -hh], [-hl, -hw, -hh], [-hl, +hw, -hh],
+    ])
+    R = np.array([[cos_h, -sin_h, 0], [sin_h, cos_h, 0], [0, 0, 1]])
+    corners_ego = corners_local @ R.T + np.array([x, y, z])
+    return corners_ego
+
+
+# 박스 corner 연결 순서 (앞면 4개, 뒷면 4개, 양쪽 연결 4개)
+_BOX_EDGES = [
+    (0, 1), (1, 2), (2, 3), (3, 0),  # 윗면
+    (4, 5), (5, 6), (6, 7), (7, 4),  # 아랫면
+    (0, 4), (1, 5), (2, 6), (3, 7),  # 수직 기둥
+]
+
+
+def _draw_projected_box(ax, corners_ego, ts, sd_token, color, linewidth=1.5):
+    """3D ego-frame box의 8 corner를 카메라에 투영 후 ax에 그림.
+    뒤쪽이거나 일부 corner depth<=0이면 그려지지 않음."""
+    uv, depth = _ego_to_camera(corners_ego, ts, sd_token)
+    if (depth <= 0.5).any():  # 카메라 너무 가깝거나 뒤쪽이면 스킵
+        return
+    for i, j in _BOX_EDGES:
+        ax.plot([uv[i, 0], uv[j, 0]], [uv[i, 1], uv[j, 1]],
+                color=color, linewidth=linewidth, alpha=0.9)
+
+
+def _draw_projected_traj(ax, traj_xy, ts, sd_token, color, marker="o"):
+    """Trajectory points (N, 2) — x forward, y left. 지면(z=0) 가정으로 카메라에 투영."""
+    if len(traj_xy) == 0:
+        return
+    pts_ego = np.column_stack([traj_xy, np.zeros(len(traj_xy))])  # z=0 (ground)
+    uv, depth = _ego_to_camera(pts_ego, ts, sd_token)
+    valid = depth > 0.5
+    if not valid.any():
+        return
+    ax.plot(uv[valid, 0], uv[valid, 1], color=color, linewidth=2,
+            marker=marker, markersize=4)
 
 
 def _short_category(name: str) -> str:
@@ -41,8 +108,10 @@ def _short_category(name: str) -> str:
 
 
 def _get_gt_boxes_with_category(ts, sample_token, config):
-    """현재 sample의 vehicle box를 ego frame에서 (x, y, h, L, W, category)로 반환.
-    dataset.py의 _get_agent_targets와 동일한 필터/정렬 적용 — 카테고리 정보까지 포함."""
+    """현재 sample의 vehicle box를 ego frame에서 7-tuple로 반환:
+    (x, y, z, heading, L, W, H, category).
+    z와 H를 함께 반환하므로 카메라 projection 시 실제 사이즈로 그릴 수 있음.
+    dataset.py의 _get_agent_targets와 동일한 필터/정렬 적용."""
     sample = ts.get("sample", sample_token)
     lidar_channel = _get_reference_channel(sample)
     sd = ts.get("sample_data", sample["data"][lidar_channel])
@@ -59,16 +128,19 @@ def _get_gt_boxes_with_category(ts, sample_token, config):
             continue
         center = box.center - ego_pos
         center = ego_rot.inverse.rotate(center)
-        x, y = float(center[0]), float(center[1])
+        x, y, z = float(center[0]), float(center[1]), float(center[2])
         if not (config.lidar_min_x <= x <= config.lidar_max_x and
                 config.lidar_min_y <= y <= config.lidar_max_y):
             continue
         box_yaw = _quaternion_to_yaw(box.orientation)
         h = (box_yaw - ego_yaw + np.pi) % (2 * np.pi) - np.pi
-        length, width = float(box.wlh[1]), float(box.wlh[0])
-        items.append((x, y, float(h), length, width, _short_category(box.name)))
+        # truckscenes wlh = [width, length, height]
+        length = float(box.wlh[1])
+        width = float(box.wlh[0])
+        height = float(box.wlh[2])
+        items.append((x, y, z, float(h), length, width, height,
+                      _short_category(box.name)))
 
-    # 가까운 거리순으로 정렬해서 num_bounding_boxes만 유지 (dataset과 동일)
     items.sort(key=lambda it: it[0] ** 2 + it[1] ** 2)
     return items[: config.num_bounding_boxes]
 
@@ -86,19 +158,87 @@ def _draw_bbox(ax, x, y, heading, length, width, color, label=None):
 
 
 def _render_sample(sample_idx, features, targets, predictions, config, out_path,
-                   gt_categories=None):
-    """한 샘플에 대해 camera + BEV 서브플롯 생성.
+                   gt_categories=None, ts=None, sample_token=None):
+    """한 샘플에 대해 camera 4개 + BEV 서브플롯 생성.
+    ts/sample_token이 주어지면 카메라마다 GT/pred 박스+trajectory를 image plane에 투영해서 그림.
     gt_categories: agent_states 순서와 동일한 길이의 카테고리 리스트 (없으면 라벨 미표시)."""
-    # BEV가 좁으면 카테고리 라벨이 안 보여서 ratio 조정 + 전체 fig 사이즈 키움
-    fig, (ax_cam, ax_bev) = plt.subplots(1, 2, figsize=(24, 12),
-                                          gridspec_kw={"width_ratios": [1.6, 1]})
+    # 위쪽: 카메라 4개 (1x4), 아래쪽: BEV (전체 너비)
+    fig = plt.figure(figsize=(24, 14))
+    gs = gridspec.GridSpec(2, 4, height_ratios=[1, 2.2], figure=fig, hspace=0.15)
+    ax_cams = [fig.add_subplot(gs[0, i]) for i in range(4)]
+    ax_bev = fig.add_subplot(gs[1, :])
 
-    # === Camera (stitched 4-view) ===
-    cam = features["camera_feature"].cpu().numpy()  # (3, H, W)
-    cam_img = np.transpose(cam, (1, 2, 0))
-    ax_cam.imshow(cam_img)
-    ax_cam.set_title(f"Sample {sample_idx} — Camera (stitched)")
-    ax_cam.axis("off")
+    # === Cameras (4개, uncropped) + projection ===
+    if ts is not None and sample_token is not None:
+        sample_obj = ts.get("sample", sample_token)
+        traj_gt_xy = targets["trajectory"].cpu().numpy()[:, :2]
+
+        # GT 박스: 실제 ego-frame z, height을 가진 정확한 3D corner 사용
+        # (agent_states는 5D라 H/z가 빠져 있어 카메라 투영엔 부정확)
+        gt_items = _get_gt_boxes_with_category(ts, sample_token, config)
+        gt_corners_list = [
+            _box_3d_corners(x, y, h, L, W, z=z, height=H)
+            for (x, y, z, h, L, W, H, _cat) in gt_items
+        ]
+
+        # Pred 박스: 모델은 (x,y,h,L,W)만 출력 → z/H는 GT 평균으로 fallback
+        # (없으면 차량 평균 height=1.7m, 지면 위 z=H/2 사용)
+        if gt_items:
+            fallback_z = float(np.mean([it[2] for it in gt_items]))
+            fallback_H = float(np.mean([it[6] for it in gt_items]))
+        else:
+            fallback_H = 1.7
+            fallback_z = fallback_H / 2.0  # 지면 위에 놓인 차량
+
+        pred_corners_list = []
+        pred_scores = []
+        pred_traj_xy = None
+        if predictions is not None:
+            pred_states = predictions["agent_states"][0].cpu().numpy()
+            pred_logits = predictions["agent_labels"][0].cpu().numpy()
+            for j in range(len(pred_logits)):
+                if pred_logits[j] < 0:
+                    continue
+                px = pred_states[j, BoundingBox2DIndex.X]
+                py = pred_states[j, BoundingBox2DIndex.Y]
+                ph = pred_states[j, BoundingBox2DIndex.HEADING]
+                pl = max(pred_states[j, BoundingBox2DIndex.LENGTH], 0.5)
+                pw = max(pred_states[j, BoundingBox2DIndex.WIDTH], 0.5)
+                pred_corners_list.append(
+                    _box_3d_corners(px, py, ph, pl, pw, z=fallback_z, height=fallback_H)
+                )
+                pred_scores.append(float(1.0 / (1.0 + np.exp(-pred_logits[j]))))
+            pred_traj_xy = predictions["trajectory"][0].cpu().numpy()[:, :2]
+
+        for ax_cam, (channel, _) in zip(ax_cams, CAMERA_CHANNELS):
+            sd = ts.get("sample_data", sample_obj["data"][channel])
+            img_path = Path(ts.dataroot) / sd["filename"]
+            img = cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB)
+            ax_cam.imshow(img)
+            ax_cam.set_title(channel.replace("CAMERA_", ""), fontsize=10)
+            ax_cam.set_xlim(0, img.shape[1])
+            ax_cam.set_ylim(img.shape[0], 0)
+            ax_cam.axis("off")
+
+            for corners in gt_corners_list:
+                _draw_projected_box(ax_cam, corners, ts, sd["token"],
+                                    color="lime", linewidth=1.5)
+            for corners in pred_corners_list:
+                _draw_projected_box(ax_cam, corners, ts, sd["token"],
+                                    color="red", linewidth=1.5)
+            _draw_projected_traj(ax_cam, traj_gt_xy, ts, sd["token"],
+                                 color="lime", marker="o")
+            if pred_traj_xy is not None:
+                _draw_projected_traj(ax_cam, pred_traj_xy, ts, sd["token"],
+                                     color="red", marker="x")
+    else:
+        # ts 미제공 시 fallback: stitched feature image
+        cam = features["camera_feature"].cpu().numpy()
+        cam_img = np.transpose(cam, (1, 2, 0))
+        ax_cams[0].imshow(cam_img)
+        ax_cams[0].axis("off")
+        for ax in ax_cams[1:]:
+            ax.axis("off")
 
     # === BEV ===
     # LiDAR histogram을 배경으로
@@ -231,11 +371,12 @@ def main(args):
         # GT 카테고리 라벨링용 — sample token으로 raw box 다시 fetch
         sample_token = dataset._sample_tokens[idx]
         gt_items = _get_gt_boxes_with_category(ts, sample_token, config)
-        gt_categories = [it[5] for it in gt_items]
+        gt_categories = [it[-1] for it in gt_items]
 
         out_path = out_dir / f"sample_{idx:05d}.png"
         _render_sample(idx, features, targets, predictions, config, out_path,
-                       gt_categories=gt_categories)
+                       gt_categories=gt_categories,
+                       ts=ts, sample_token=sample_token)
         print(f"  saved: {out_path}")
 
     print(f"\n{args.num} visualizations saved to {out_dir}/")
