@@ -1,6 +1,8 @@
 """
 시각화 — BEV + camera + GT trajectory/bboxes + (선택) 모델 prediction까지 오버레이해서 PNG로 저장.
-학습 데이터가 좌표계/스케일상 말이 되는지 눈으로 확인 + checkpoint가 있으면 예측 품질도 같이 점검.
+
+박스 카메라 투영은 truckscenes-devkit 방식(`box.render(ax, view=K)`)을 그대로 사용해
+yaw 외 pitch/roll까지 포함된 정확한 3D 회전이 적용됨.
 
 사용법:
     # checkpoint 없이 GT만 시각화
@@ -20,11 +22,16 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from pyquaternion import Quaternion
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pyquaternion import Quaternion
-from truckscenes.utils.geometry_utils import view_points
+from truckscenes.utils.data_classes import Box
+from truckscenes.utils.geometry_utils import (
+    BoxVisibility,
+    box_in_image,
+    view_points,
+)
 
 from model.config import TransfuserConfig
 from model.model import TransfuserModel
@@ -38,69 +45,6 @@ from dataset.dataset import (
 )
 
 
-def _ego_to_camera(points_ego: np.ndarray, ts, sd_token: str):
-    """Ego-frame (N,3) 점을 카메라 frame으로 변환 + 이미지로 projection.
-    반환: (proj_uv: (N,2), depth: (N,)) — depth>0인 점만 화면 앞쪽."""
-    sd = ts.get("sample_data", sd_token)
-    cs = ts.get("calibrated_sensor", sd["calibrated_sensor_token"])
-    K = np.array(cs["camera_intrinsic"])
-    cam_t = np.array(cs["translation"])
-    cam_R = Quaternion(cs["rotation"]).rotation_matrix  # ego←cam
-
-    # ego→cam: p_cam = R^T (p_ego - t). row-vector form: (p_ego - t) @ R
-    p_cam = (points_ego - cam_t) @ cam_R  # (N, 3)
-    # view_points는 column-vector 입력
-    proj = view_points(p_cam.T, K, normalize=True)  # (3, N) — u, v, 1
-    return proj[:2].T, p_cam[:, 2]
-
-
-def _box_3d_corners(x: float, y: float, heading: float, length: float, width: float,
-                     z: float = 0.0, height: float = 1.7):
-    """ego-frame box의 8 corner 3D 좌표 (N=8, 3). z는 box 중심의 ego-frame z 좌표."""
-    cos_h, sin_h = np.cos(heading), np.sin(heading)
-    hl, hw, hh = length / 2, width / 2, height / 2
-    # box-local corners (forward, left, up)
-    corners_local = np.array([
-        [+hl, +hw, +hh], [+hl, -hw, +hh], [-hl, -hw, +hh], [-hl, +hw, +hh],
-        [+hl, +hw, -hh], [+hl, -hw, -hh], [-hl, -hw, -hh], [-hl, +hw, -hh],
-    ])
-    R = np.array([[cos_h, -sin_h, 0], [sin_h, cos_h, 0], [0, 0, 1]])
-    corners_ego = corners_local @ R.T + np.array([x, y, z])
-    return corners_ego
-
-
-# 박스 corner 연결 순서 (앞면 4개, 뒷면 4개, 양쪽 연결 4개)
-_BOX_EDGES = [
-    (0, 1), (1, 2), (2, 3), (3, 0),  # 윗면
-    (4, 5), (5, 6), (6, 7), (7, 4),  # 아랫면
-    (0, 4), (1, 5), (2, 6), (3, 7),  # 수직 기둥
-]
-
-
-def _draw_projected_box(ax, corners_ego, ts, sd_token, color, linewidth=1.5):
-    """3D ego-frame box의 8 corner를 카메라에 투영 후 ax에 그림.
-    뒤쪽이거나 일부 corner depth<=0이면 그려지지 않음."""
-    uv, depth = _ego_to_camera(corners_ego, ts, sd_token)
-    if (depth <= 0.5).any():  # 카메라 너무 가깝거나 뒤쪽이면 스킵
-        return
-    for i, j in _BOX_EDGES:
-        ax.plot([uv[i, 0], uv[j, 0]], [uv[i, 1], uv[j, 1]],
-                color=color, linewidth=linewidth, alpha=0.9)
-
-
-def _draw_projected_traj(ax, traj_xy, ts, sd_token, color, marker="o"):
-    """Trajectory points (N, 2) — x forward, y left. 지면(z=0) 가정으로 카메라에 투영."""
-    if len(traj_xy) == 0:
-        return
-    pts_ego = np.column_stack([traj_xy, np.zeros(len(traj_xy))])  # z=0 (ground)
-    uv, depth = _ego_to_camera(pts_ego, ts, sd_token)
-    valid = depth > 0.5
-    if not valid.any():
-        return
-    ax.plot(uv[valid, 0], uv[valid, 1], color=color, linewidth=2,
-            marker=marker, markersize=4)
-
-
 def _short_category(name: str) -> str:
     """vehicle.bus.bendy → bus, vehicle.car → car (시각화용 짧은 라벨)."""
     parts = name.split(".")
@@ -108,10 +52,12 @@ def _short_category(name: str) -> str:
 
 
 def _get_gt_boxes_with_category(ts, sample_token, config):
-    """현재 sample의 vehicle box를 ego frame에서 7-tuple로 반환:
+    """현재 sample의 vehicle box를 ego frame에서 8-tuple로 반환:
     (x, y, z, heading, L, W, H, category).
-    z와 H를 함께 반환하므로 카메라 projection 시 실제 사이즈로 그릴 수 있음.
-    dataset.py의 _get_agent_targets와 동일한 필터/정렬 적용."""
+    BEV 전용. 카메라 투영은 _draw_camera_devkit이 별도로 처리(devkit 사용).
+
+    dataset.py의 _get_agent_targets와 동일한 필터/정렬 적용.
+    """
     sample = ts.get("sample", sample_token)
     lidar_channel = _get_reference_channel(sample)
     sd = ts.get("sample_data", sample["data"][lidar_channel])
@@ -157,80 +103,193 @@ def _draw_bbox(ax, x, y, heading, length, width, color, label=None):
     ax.add_patch(poly)
 
 
+def _ego_frame_box_to_sensor(box_ego: Box, cam_cs):
+    """ego frame Box 객체를 카메라 sensor frame으로 in-place 변환.
+    (예측 박스용 — 모델은 ego frame에서 (x, y, h, L, W) 출력하므로
+    devkit `boxes_to_sensor`의 두 번째 단계만 적용하면 됨.)
+    """
+    box_ego.translate(-np.array(cam_cs["translation"]))
+    box_ego.rotate(Quaternion(cam_cs["rotation"]).inverse)
+
+
+def _proj_ego_points_to_image(points_ego: np.ndarray, cam_cs):
+    """ego frame (N, 3) 점들을 카메라에 투영. (uv (N, 2), depth (N,)) 반환.
+    trajectory 시각화용 — 박스가 아니므로 단순 변환만.
+    """
+    cam_t = np.array(cam_cs["translation"])
+    cam_R = Quaternion(cam_cs["rotation"]).rotation_matrix  # ego←cam
+    K = np.array(cam_cs["camera_intrinsic"])
+    pts_cam = (points_ego - cam_t) @ cam_R  # ego→cam: R^T (p - t) (행벡터 표기)
+    proj = view_points(pts_cam.T, K, normalize=True)  # (3, N)
+    return proj[:2].T, pts_cam[:, 2]
+
+
+def _draw_camera_devkit(ax, ts, sample_token, channel,
+                        traj_gt_ego=None, traj_pred_ego=None,
+                        trailer_traj_gt_ego=None, trailer_traj_pred_ego=None,
+                        trailer_mask=0.0,
+                        pred_states_ego=None, pred_logits=None,
+                        config=None):
+    """devkit 방식으로 한 카메라에 이미지 + GT/pred 박스 + trajectory 그림.
+
+    GT 박스: `ts.get_sample_data(cam_sd)`로 sensor frame Box 객체 받기 →
+             `box.render(ax, view=K)` (full 3D rotation 적용).
+    Pred 박스: ego frame (x, y, h, L, W)에서 Box 만들고 ego→cam 변환 후 동일 render.
+    Trajectory:
+      - truck GT: lime / pred: red
+      - trailer GT: cyan / pred: magenta (trailer_mask>0.5인 sample만)
+    """
+    sample = ts.get("sample", sample_token)
+    cam_sd_token = sample["data"][channel]
+    cam_sd = ts.get("sample_data", cam_sd_token)
+    cam_cs = ts.get("calibrated_sensor", cam_sd["calibrated_sensor_token"])
+    K = np.array(cam_cs["camera_intrinsic"])
+
+    img_path = Path(ts.dataroot) / cam_sd["filename"]
+    img = cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB)
+    ax.imshow(img)
+    ax.set_title(channel.replace("CAMERA_", ""), fontsize=10)
+    ax.set_xlim(0, img.shape[1])
+    ax.set_ylim(img.shape[0], 0)
+    ax.axis("off")
+    imsize = (img.shape[1], img.shape[0])
+
+    # GT 박스 — devkit이 sample timestamp 기준 ego_pose + cs로 sensor frame 변환
+    _, gt_boxes_sensor, _ = ts.get_sample_data(
+        cam_sd_token, box_vis_level=BoxVisibility.ANY,
+    )
+    for b in gt_boxes_sensor:
+        # ego trailer는 별도 색(yellow)으로 강조 — ego의 일부
+        is_ego_trailer = (b.name == "vehicle.ego_trailer")
+        if not (_is_vehicle_category(b.name) or is_ego_trailer):
+            continue
+        if not box_in_image(b, K, imsize, vis_level=BoxVisibility.ANY):
+            continue
+        color = "yellow" if is_ego_trailer else "lime"
+        lw = 2.0 if is_ego_trailer else 1.5
+        b.render(ax, view=K, normalize=True,
+                 colors=(color, color, color), linewidth=lw)
+
+    # Pred 박스 — ego frame Box 객체로 만들어 sensor frame 변환 후 render
+    if pred_states_ego is not None and pred_logits is not None:
+        # height/z fallback — sensor frame Box들로부터 평균 높이 추정
+        if gt_boxes_sensor:
+            avg_h = float(np.mean([b.wlh[2] for b in gt_boxes_sensor]))
+        else:
+            avg_h = 1.7
+        fallback_z = avg_h / 2.0  # 지면 위에 놓인 차량
+
+        for j in range(len(pred_logits)):
+            if pred_logits[j] < 0:  # logit < 0 → confidence < 0.5
+                continue
+            px = float(pred_states_ego[j, BoundingBox2DIndex.X])
+            py = float(pred_states_ego[j, BoundingBox2DIndex.Y])
+            ph = float(pred_states_ego[j, BoundingBox2DIndex.HEADING])
+            pl = max(float(pred_states_ego[j, BoundingBox2DIndex.LENGTH]), 0.5)
+            pw = max(float(pred_states_ego[j, BoundingBox2DIndex.WIDTH]), 0.5)
+
+            # truckscenes Box: center, wlh=[w, l, h], orientation Quaternion (ego frame)
+            box = Box(
+                center=[px, py, fallback_z],
+                size=[pw, pl, avg_h],
+                orientation=Quaternion(axis=[0, 0, 1], angle=ph),
+            )
+            # ego → camera frame
+            _ego_frame_box_to_sensor(box, cam_cs)
+            if not box_in_image(box, K, imsize, vis_level=BoxVisibility.ANY):
+                continue
+            box.render(ax, view=K, normalize=True,
+                       colors=("red", "red", "red"), linewidth=1.5)
+
+    # Trajectory — z=0 (지면) 가정
+    # 색깔 컨벤션:
+    #   GT truck    : pink     동그라미
+    #   Pred truck  : red      x
+    #   GT trailer  : limegreen 동그라미
+    #   Pred trailer: darkgreen x
+    if traj_gt_ego is not None and len(traj_gt_ego) > 0:
+        pts = np.column_stack([traj_gt_ego, np.zeros(len(traj_gt_ego))])
+        uv, depth = _proj_ego_points_to_image(pts, cam_cs)
+        valid = depth > 0.5
+        if valid.any():
+            ax.plot(uv[valid, 0], uv[valid, 1], color="pink",
+                    linewidth=2, marker="o", markersize=4)
+
+    if traj_pred_ego is not None and len(traj_pred_ego) > 0:
+        pts = np.column_stack([traj_pred_ego, np.zeros(len(traj_pred_ego))])
+        uv, depth = _proj_ego_points_to_image(pts, cam_cs)
+        valid = depth > 0.5
+        if valid.any():
+            ax.plot(uv[valid, 0], uv[valid, 1], color="red",
+                    linewidth=2, marker="x", markersize=4)
+
+    # Trailer trajectory — mask=1.0 sample만
+    if trailer_mask > 0.5:
+        if trailer_traj_gt_ego is not None and len(trailer_traj_gt_ego) > 0:
+            pts = np.column_stack([trailer_traj_gt_ego, np.zeros(len(trailer_traj_gt_ego))])
+            uv, depth = _proj_ego_points_to_image(pts, cam_cs)
+            valid = depth > 0.5
+            if valid.any():
+                ax.plot(uv[valid, 0], uv[valid, 1], color="limegreen",
+                        linewidth=2, marker="o", markersize=4)
+        if trailer_traj_pred_ego is not None and len(trailer_traj_pred_ego) > 0:
+            pts = np.column_stack([trailer_traj_pred_ego, np.zeros(len(trailer_traj_pred_ego))])
+            uv, depth = _proj_ego_points_to_image(pts, cam_cs)
+            valid = depth > 0.5
+            if valid.any():
+                ax.plot(uv[valid, 0], uv[valid, 1], color="darkgreen",
+                        linewidth=2, marker="x", markersize=4)
+
+
 def _render_sample(sample_idx, features, targets, predictions, config, out_path,
                    gt_categories=None, ts=None, sample_token=None):
     """한 샘플에 대해 camera 4개 + BEV 서브플롯 생성.
-    ts/sample_token이 주어지면 카메라마다 GT/pred 박스+trajectory를 image plane에 투영해서 그림.
-    gt_categories: agent_states 순서와 동일한 길이의 카테고리 리스트 (없으면 라벨 미표시)."""
-    # 위쪽: 카메라 4개 (1x4), 아래쪽: BEV (전체 너비)
+    카메라 박스 투영은 _draw_camera_devkit이 처리 (devkit Box.render 사용).
+    BEV는 ego frame 5-tuple로 직접 그림 — 변경 없음.
+    """
     fig = plt.figure(figsize=(24, 14))
     gs = gridspec.GridSpec(2, 4, height_ratios=[1, 2.2], figure=fig, hspace=0.15)
     ax_cams = [fig.add_subplot(gs[0, i]) for i in range(4)]
     ax_bev = fig.add_subplot(gs[1, :])
 
-    # === Cameras (4개, uncropped) + projection ===
+    # === 카메라 4개 — devkit 방식 ===
     if ts is not None and sample_token is not None:
-        sample_obj = ts.get("sample", sample_token)
         traj_gt_xy = targets["trajectory"].cpu().numpy()[:, :2]
+        # trailer GT (mask=1인 sample만 의미 있음)
+        trailer_traj_gt_xy = None
+        trailer_mask = 0.0
+        if "trailer_trajectory" in targets:
+            trailer_traj_gt_xy = targets["trailer_trajectory"].cpu().numpy()[:, :2]
+            trailer_mask = float(targets.get("trailer_mask",
+                                             torch.tensor(0.0)).item())
 
-        # GT 박스: 실제 ego-frame z, height을 가진 정확한 3D corner 사용
-        # (agent_states는 5D라 H/z가 빠져 있어 카메라 투영엔 부정확)
-        gt_items = _get_gt_boxes_with_category(ts, sample_token, config)
-        gt_corners_list = [
-            _box_3d_corners(x, y, h, L, W, z=z, height=H)
-            for (x, y, z, h, L, W, H, _cat) in gt_items
-        ]
-
-        # Pred 박스: 모델은 (x,y,h,L,W)만 출력 → z/H는 GT 평균으로 fallback
-        # (없으면 차량 평균 height=1.7m, 지면 위 z=H/2 사용)
-        if gt_items:
-            fallback_z = float(np.mean([it[2] for it in gt_items]))
-            fallback_H = float(np.mean([it[6] for it in gt_items]))
-        else:
-            fallback_H = 1.7
-            fallback_z = fallback_H / 2.0  # 지면 위에 놓인 차량
-
-        pred_corners_list = []
-        pred_scores = []
-        pred_traj_xy = None
         if predictions is not None:
+            pred_traj_xy = predictions["trajectory"][0].cpu().numpy()[:, :2]
             pred_states = predictions["agent_states"][0].cpu().numpy()
             pred_logits = predictions["agent_labels"][0].cpu().numpy()
-            for j in range(len(pred_logits)):
-                if pred_logits[j] < 0:
-                    continue
-                px = pred_states[j, BoundingBox2DIndex.X]
-                py = pred_states[j, BoundingBox2DIndex.Y]
-                ph = pred_states[j, BoundingBox2DIndex.HEADING]
-                pl = max(pred_states[j, BoundingBox2DIndex.LENGTH], 0.5)
-                pw = max(pred_states[j, BoundingBox2DIndex.WIDTH], 0.5)
-                pred_corners_list.append(
-                    _box_3d_corners(px, py, ph, pl, pw, z=fallback_z, height=fallback_H)
+            trailer_traj_pred_xy = None
+            if "trailer_trajectory" in predictions:
+                trailer_traj_pred_xy = (
+                    predictions["trailer_trajectory"][0].cpu().numpy()[:, :2]
                 )
-                pred_scores.append(float(1.0 / (1.0 + np.exp(-pred_logits[j]))))
-            pred_traj_xy = predictions["trajectory"][0].cpu().numpy()[:, :2]
+        else:
+            pred_traj_xy = None
+            pred_states = None
+            pred_logits = None
+            trailer_traj_pred_xy = None
 
         for ax_cam, (channel, _) in zip(ax_cams, CAMERA_CHANNELS):
-            sd = ts.get("sample_data", sample_obj["data"][channel])
-            img_path = Path(ts.dataroot) / sd["filename"]
-            img = cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB)
-            ax_cam.imshow(img)
-            ax_cam.set_title(channel.replace("CAMERA_", ""), fontsize=10)
-            ax_cam.set_xlim(0, img.shape[1])
-            ax_cam.set_ylim(img.shape[0], 0)
-            ax_cam.axis("off")
-
-            for corners in gt_corners_list:
-                _draw_projected_box(ax_cam, corners, ts, sd["token"],
-                                    color="lime", linewidth=1.5)
-            for corners in pred_corners_list:
-                _draw_projected_box(ax_cam, corners, ts, sd["token"],
-                                    color="red", linewidth=1.5)
-            _draw_projected_traj(ax_cam, traj_gt_xy, ts, sd["token"],
-                                 color="lime", marker="o")
-            if pred_traj_xy is not None:
-                _draw_projected_traj(ax_cam, pred_traj_xy, ts, sd["token"],
-                                     color="red", marker="x")
+            _draw_camera_devkit(
+                ax_cam, ts, sample_token, channel,
+                traj_gt_ego=traj_gt_xy,
+                traj_pred_ego=pred_traj_xy,
+                trailer_traj_gt_ego=trailer_traj_gt_xy,
+                trailer_traj_pred_ego=trailer_traj_pred_xy,
+                trailer_mask=trailer_mask,
+                pred_states_ego=pred_states,
+                pred_logits=pred_logits,
+                config=config,
+            )
     else:
         # ts 미제공 시 fallback: stitched feature image
         cam = features["camera_feature"].cpu().numpy()
@@ -241,35 +300,59 @@ def _render_sample(sample_idx, features, targets, predictions, config, out_path,
             ax.axis("off")
 
     # === BEV ===
-    # LiDAR histogram을 배경으로
     lidar = features["lidar_feature"].cpu().numpy()  # (1 또는 2, H, W)
-    # 첫 채널(또는 sum)을 sky view로 표시
     lidar_bg = lidar[0] if lidar.shape[0] == 1 else lidar.sum(0)
 
     # BEV 좌표 변환: ego frame (+x forward, +y LEFT) → plot frame (+up, +left)
-    # 매핑: plot_x = -ego_y, plot_y = ego_x. 이는 CCW π/2 rotation이므로
-    # 모든 heading도 plot에 그릴 땐 π/2 만큼 추가 회전해야 함.
-    #
-    # lidar_feature 매트릭스는 shape (C, H=x_bins, W=y_bins):
-    #   - 축0 = ego_x (forward) → plot_y로 매핑
-    #   - 축1 = ego_y (LEFT)   → plot_x로 매핑하되 -부호 (플롯 왼쪽이 +ego_y)
-    # [:, ::-1]로 y_bins 반전 + origin="lower"로 row 0을 bottom에 두면 정렬 완료.
+    # plot_x = -ego_y, plot_y = ego_x. CCW π/2 rotation이므로 heading도 +π/2.
     extent = [config.lidar_min_y, config.lidar_max_y,
               config.lidar_min_x, config.lidar_max_x]
     ax_bev.imshow(lidar_bg[:, ::-1], extent=extent, cmap="gray_r",
                   origin="lower", alpha=0.6)
 
-    # Ego vehicle — heading=0 + plot 회전 π/2 → 세로로 서있는 박스로 그려짐
-    _draw_bbox(ax_bev, 0, 0, np.pi / 2, 6.9, 2.5, color="blue", label="ego")
+    # Ego truck (tractor) — heading=0 + plot 회전 π/2 → 세로 박스
+    _draw_bbox(ax_bev, 0, 0, np.pi / 2, 6.9, 2.5, color="blue", label="ego truck")
+
+    # Ego trailer — 현재 sample의 vehicle.ego_trailer ann을 ego frame으로 변환해서 그림
+    if ts is not None and sample_token is not None:
+        sample_obj = ts.get("sample", sample_token)
+        lidar_channel = _get_reference_channel(sample_obj)
+        sd_lidar = ts.get("sample_data", sample_obj["data"][lidar_channel])
+        ego_pose_lidar = ts.get("ego_pose", sd_lidar["ego_pose_token"])
+        ego_pos = np.array(ego_pose_lidar["translation"])
+        ego_rot = Quaternion(ego_pose_lidar["rotation"])
+        ego_yaw = _quaternion_to_yaw(ego_rot)
+        for b in ts.get_boxes(sd_lidar["token"]):
+            if b.name != "vehicle.ego_trailer":
+                continue
+            # global → tractor ego frame
+            center = ego_rot.inverse.rotate(b.center - ego_pos)
+            tx, ty = float(center[0]), float(center[1])
+            box_yaw = _quaternion_to_yaw(b.orientation)
+            heading_ego = (box_yaw - ego_yaw + np.pi) % (2 * np.pi) - np.pi
+            length = float(b.wlh[1])
+            width = float(b.wlh[0])
+            _draw_bbox(ax_bev, -ty, tx, heading_ego + np.pi / 2,
+                       length, width, color="orange", label="ego trailer")
     ax_bev.plot(0, 0, "b*", markersize=12)
 
-    # GT trajectory
+    # GT truck trajectory — pink 동그라미
     traj_gt = targets["trajectory"].cpu().numpy()  # (num_poses, 3)
-    # BEV에서 x-forward는 위쪽 축, y-left는 왼쪽 축
-    # ax_bev의 x축 = ego y (left), y축 = ego x (forward)
-    ax_bev.plot(-traj_gt[:, 1], traj_gt[:, 0], "g-o", markersize=4, linewidth=2, label="GT traj")
+    ax_bev.plot(-traj_gt[:, 1], traj_gt[:, 0],
+                color="pink", linestyle="-", marker="o",
+                markersize=5, linewidth=2, label="GT truck traj")
 
-    # GT agent boxes — 각 박스 위에 카테고리 라벨 표시 (없으면 인덱스)
+    # GT trailer trajectory (mask=1.0 sample만) — limegreen 동그라미
+    if "trailer_trajectory" in targets:
+        trailer_mask_bev = float(targets.get("trailer_mask",
+                                              torch.tensor(0.0)).item())
+        if trailer_mask_bev > 0.5:
+            tt = targets["trailer_trajectory"].cpu().numpy()
+            ax_bev.plot(-tt[:, 1], tt[:, 0],
+                        color="limegreen", linestyle="-", marker="o",
+                        markersize=5, linewidth=2, label="GT trailer traj")
+
+    # GT agent boxes
     gt_states = targets["agent_states"].cpu().numpy()
     gt_labels = targets["agent_labels"].cpu().numpy()
     first_valid = True
@@ -280,33 +363,40 @@ def _render_sample(sample_idx, features, targets, predictions, config, out_path,
         _draw_bbox(ax_bev, -y, x, h + np.pi / 2, length, width,
                    color="green", label="GT agent" if first_valid else None)
         first_valid = False
-        # 라벨: gt_categories가 있으면 카테고리(예: "car"), 없으면 인덱스
         text = gt_categories[j] if gt_categories and j < len(gt_categories) else f"{j}"
         ax_bev.text(-y, x, text, fontsize=9, color="green",
                     ha="center", va="center", fontweight="bold")
 
-    # Predictions (있으면)
+    # Predictions
     if predictions is not None:
+        # Pred truck — red x
         pred_traj = predictions["trajectory"][0].cpu().numpy()
-        ax_bev.plot(-pred_traj[:, 1], pred_traj[:, 0], "r--o", markersize=4,
-                    linewidth=2, label="Pred traj")
+        ax_bev.plot(-pred_traj[:, 1], pred_traj[:, 0],
+                    color="red", linestyle="--", marker="x",
+                    markersize=6, linewidth=2, label="Pred truck traj")
+        # Pred trailer — darkgreen x (mask 무관, 모델은 항상 출력. mask=0이면 무의미)
+        if "trailer_trajectory" in predictions:
+            pred_tt = predictions["trailer_trajectory"][0].cpu().numpy()
+            ax_bev.plot(-pred_tt[:, 1], pred_tt[:, 0],
+                        color="darkgreen", linestyle="--", marker="x",
+                        markersize=6, linewidth=2, label="Pred trailer traj")
 
         pred_states = predictions["agent_states"][0].cpu().numpy()
         pred_logits = predictions["agent_labels"][0].cpu().numpy()
-        # logit > 0 (= confidence > 0.5)인 것만 표시 + 점수 라벨
         for j in range(len(pred_logits)):
             if pred_logits[j] < 0:
                 continue
-            x, y, h = pred_states[j, BoundingBox2DIndex.X], pred_states[j, BoundingBox2DIndex.Y], pred_states[j, BoundingBox2DIndex.HEADING]
+            x = pred_states[j, BoundingBox2DIndex.X]
+            y = pred_states[j, BoundingBox2DIndex.Y]
+            h = pred_states[j, BoundingBox2DIndex.HEADING]
             length = pred_states[j, BoundingBox2DIndex.LENGTH]
             width = pred_states[j, BoundingBox2DIndex.WIDTH]
-            score = float(1.0 / (1.0 + np.exp(-pred_logits[j])))  # sigmoid
+            score = float(1.0 / (1.0 + np.exp(-pred_logits[j])))
             _draw_bbox(ax_bev, -y, x, h + np.pi / 2, length, width,
                        color="red", label="Pred agent" if j == 0 else None)
             ax_bev.text(-y, x, f"{score:.2f}", fontsize=9, color="red",
                         ha="center", va="center", fontweight="bold")
 
-    # Status 정보 (vx, vy, ax, ay)
     status = features["status_feature"].cpu().numpy()
     ax_bev.set_title(
         f"Sample {sample_idx} — BEV (ego-centric)\n"
@@ -347,7 +437,6 @@ def main(args):
     )
     print(f"Split '{args.split}': {len(dataset)} samples")
 
-    # 모델 로드 (checkpoint 주어진 경우)
     model = None
     if args.checkpoint:
         model = TransfuserModel(config=config).to(device)
@@ -356,7 +445,6 @@ def main(args):
         model.eval()
         print(f"Loaded: {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
-    # 균등 간격으로 샘플 인덱스 선택
     step = max(len(dataset) // args.num, 1)
     indices = [i * step for i in range(args.num)]
 
@@ -368,7 +456,6 @@ def main(args):
                 features_batch = {k: v.unsqueeze(0).to(device) for k, v in features.items()}
                 predictions = model(features_batch)
 
-        # GT 카테고리 라벨링용 — sample token으로 raw box 다시 fetch
         sample_token = dataset._sample_tokens[idx]
         gt_items = _get_gt_boxes_with_category(ts, sample_token, config)
         gt_categories = [it[-1] for it in gt_items]

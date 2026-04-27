@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Dict
 
 import torch
 from torch.utils.data import DataLoader
@@ -52,9 +53,15 @@ class _Tee:
 
 
 def _setup_work_dir(args) -> Path:
-    """work_dirs/<name>/ 구조 생성. 이름 없으면 타임스탬프 + run_name."""
-    # 우선순위: --work_dir 명시 > (wandb_run_name or "run") + 타임스탬프
-    if args.work_dir is not None:
+    """work_dirs/<name>/ 구조 생성. 이름 없으면 타임스탬프 + run_name.
+
+    --resume 지정 시 ckpt의 work_dir(parent.parent) 자동 사용 → 같은 디렉터리에 이어 저장.
+    """
+    # 우선순위: --resume의 work_dir 추정 > --work_dir 명시 > (wandb_run_name or "run") + 타임스탬프
+    if args.resume is not None and args.work_dir is None:
+        # ckpt: work_dirs/<run_name>/checkpoints/epochN.pt → work_dirs/<run_name>/
+        work_dir = Path(args.resume).resolve().parent.parent
+    elif args.work_dir is not None:
         work_dir = Path(args.work_dir)
     else:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -105,17 +112,31 @@ def train(args):
     # Config
     config = TransfuserConfig()
 
+    # resume용 ckpt 미리 로드 (wandb run id 필요해서 wandb.init보다 먼저)
+    resume_ckpt = None
+    if args.resume is not None:
+        print(f"Resuming from {args.resume}...")
+        resume_ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+        print(f"  ckpt epoch: {resume_ckpt.get('epoch', '?')}, "
+              f"global_step: {resume_ckpt.get('global_step', '?')}")
+
     # wandb 초기화 — --wandb 플래그가 있을 때만
     use_wandb = args.wandb and wandb is not None
     if args.wandb and wandb is None:
         print("WARNING: --wandb 지정됐지만 wandb 모듈 없음. 'pip install wandb'.")
     if use_wandb:
-        wandb.init(
+        wandb_kwargs = dict(
             project=args.wandb_project,
             name=args.wandb_run_name,
             config=vars(args),
-            dir=str(work_dir),  # wandb 로컬 파일도 work_dir 아래에 저장
+            dir=str(work_dir),
         )
+        # resume: 같은 run id로 이어가기 (wandb 그래프 연속)
+        if resume_ckpt is not None and resume_ckpt.get("wandb_run_id"):
+            wandb_kwargs["id"] = resume_ckpt["wandb_run_id"]
+            wandb_kwargs["resume"] = "must"
+            print(f"  wandb resume id={resume_ckpt['wandb_run_id']}")
+        wandb.init(**wandb_kwargs)
 
     # Initialize TruckScenes
     from truckscenes.truckscenes import TruckScenes
@@ -146,6 +167,10 @@ def train(args):
         collate_fn=collate_fn,
         pin_memory=True,
         drop_last=True,
+        # epoch 사이 worker pool 재생성 비용 제거 (4 카메라 + 6 LiDAR 디코딩이 무거워 효과 큼)
+        persistent_workers=args.num_workers > 0,
+        # 각 worker가 미리 만들어둘 batch 수 (default 2). num_workers와 함께 늘려 GPU 굶지 않게.
+        prefetch_factor=4 if args.num_workers > 0 else None,
     )
 
     # Val dataset — run_evaluation이 인덱싱 방식으로 순회하므로 DataLoader 불필요
@@ -166,11 +191,30 @@ def train(args):
     print(f"Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
     print(f"Batches per epoch: {len(dataloader)}")
 
+    # Resume — model/optimizer/scheduler/step/epoch 복원
+    start_epoch = 0
+    global_step = 0
+    if resume_ckpt is not None:
+        model.load_state_dict(resume_ckpt["model_state_dict"])
+        optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in resume_ckpt:
+            scheduler.load_state_dict(resume_ckpt["scheduler_state_dict"])
+        else:
+            # 옛 ckpt(scheduler 안 저장한 형식): epoch 만큼 step 진행해서 LR 맞춤
+            for _ in range(resume_ckpt["epoch"]):
+                scheduler.step()
+            print(f"  WARNING: scheduler_state_dict 없음 → epoch {resume_ckpt['epoch']}회 step()로 LR 추정")
+        start_epoch = resume_ckpt["epoch"]
+        global_step = resume_ckpt.get("global_step", 0)
+        print(f"  resumed: start_epoch={start_epoch}, global_step={global_step}, "
+              f"lr={scheduler.get_last_lr()[0]:.6f}")
+
     # Training loop
     model.train()
-    global_step = 0  # 전체 학습 스텝 카운터 (wandb x축용)
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         epoch_loss = 0.0
+        # epoch 단위 component 누적 (epoch 끝에 평균 출력 + wandb)
+        epoch_components: Dict[str, float] = {}
         epoch_start = time.time()
 
         for batch_idx, (features, targets) in enumerate(dataloader):
@@ -180,7 +224,7 @@ def train(args):
 
             # Forward
             predictions = model(features)
-            loss = transfuser_loss(targets, predictions, config)
+            loss, comp = transfuser_loss(targets, predictions, config)
 
             # Backward
             optimizer.zero_grad()
@@ -189,6 +233,8 @@ def train(args):
             optimizer.step()
 
             epoch_loss += loss.item()
+            for k, v in comp.items():
+                epoch_components[k] = epoch_components.get(k, 0.0) + v.item()
             global_step += 1
 
             if batch_idx % args.log_interval == 0:
@@ -200,41 +246,47 @@ def train(args):
                 # 전체 ETA: 남은 배치 + 남은 에폭
                 remaining_batches = (len(dataloader) - batches_done) + (args.epochs - epoch - 1) * len(dataloader)
                 eta_total = batch_time * remaining_batches
+                # component 한 줄로 요약 (있는 키만)
+                comp_str = " ".join(f"{k}={v.item():.2f}" for k, v in comp.items())
                 print(
                     f"  Epoch {epoch+1}/{args.epochs} "
                     f"[{batch_idx}/{len(dataloader)}] "
-                    f"Loss: {loss.item():.4f} | "
+                    f"Loss: {loss.item():.4f} | {comp_str} | "
                     f"{batch_time:.2f}s/it | "
                     f"ETA epoch: {_format_eta(eta_epoch)} | "
                     f"total: {_format_eta(eta_total)}"
                 )
-                # 배치 단위 loss + lr 로깅
+                # 배치 단위 loss + component + lr 로깅
                 if use_wandb:
-                    wandb.log(
-                        {
-                            "train/loss": loss.item(),
-                            "train/lr": optimizer.param_groups[0]["lr"],
-                            "train/epoch": epoch + 1,
-                        },
-                        step=global_step,
-                    )
+                    log_dict = {
+                        "train/loss": loss.item(),
+                        "train/lr": optimizer.param_groups[0]["lr"],
+                        "train/epoch": epoch + 1,
+                    }
+                    for k, v in comp.items():
+                        log_dict[f"train/{k}"] = v.item()
+                    wandb.log(log_dict, step=global_step)
 
         scheduler.step()
-        avg_loss = epoch_loss / max(len(dataloader), 1)
+        n_batches = max(len(dataloader), 1)
+        avg_loss = epoch_loss / n_batches
+        avg_components = {k: v / n_batches for k, v in epoch_components.items()}
         elapsed = time.time() - epoch_start
-        print(f"Epoch {epoch+1}/{args.epochs} done | Avg Loss: {avg_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f} | Time: {elapsed:.1f}s")
+        comp_str = " ".join(f"{k}={v:.3f}" for k, v in avg_components.items())
+        print(f"Epoch {epoch+1}/{args.epochs} done | Avg Loss: {avg_loss:.4f} "
+              f"| {comp_str} | LR: {scheduler.get_last_lr()[0]:.6f} | Time: {elapsed:.1f}s")
 
-        # epoch 단위 집계 로깅
+        # epoch 단위 집계 로깅 (component 평균 포함)
         if use_wandb:
-            wandb.log(
-                {
-                    "epoch/avg_loss": avg_loss,
-                    "epoch/lr": scheduler.get_last_lr()[0],
-                    "epoch/time_sec": elapsed,
-                    "epoch/index": epoch + 1,
-                },
-                step=global_step,
-            )
+            ep_log = {
+                "epoch/avg_loss": avg_loss,
+                "epoch/lr": scheduler.get_last_lr()[0],
+                "epoch/time_sec": elapsed,
+                "epoch/index": epoch + 1,
+            }
+            for k, v in avg_components.items():
+                ep_log[f"epoch/avg_{k}"] = v
+            wandb.log(ep_log, step=global_step)
 
         # Validation — 매 epoch 끝에 L2 + collision 평가
         eval_start = time.time()
@@ -261,13 +313,18 @@ def train(args):
         # Save checkpoint (work_dir/checkpoints/)
         if (epoch + 1) % args.save_interval == 0:
             ckpt_path = work_dir / "checkpoints" / f"epoch{epoch+1}.pt"
-            torch.save({
+            ckpt = {
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "global_step": global_step,
                 "loss": avg_loss,
                 "val_metrics": val_metrics,
-            }, ckpt_path)
+            }
+            if use_wandb:
+                ckpt["wandb_run_id"] = wandb.run.id
+            torch.save(ckpt, ckpt_path)
             print(f"Saved checkpoint: {ckpt_path}")
 
     print("Training complete.")
@@ -319,9 +376,12 @@ def sanity_check(args):
     # Loss
     model.train()
     predictions = model(features)
-    loss = transfuser_loss(targets, predictions, config)
+    loss, comp = transfuser_loss(targets, predictions, config)
     print(f"\nLoss: {loss.item():.4f}")
     print(f"Loss is finite: {torch.isfinite(loss).item()}")
+    print("Component breakdown (un-weighted):")
+    for k, v in comp.items():
+        print(f"  {k}: {v.item():.4f}")
 
     # Backward
     loss.backward()
@@ -351,6 +411,9 @@ if __name__ == "__main__":
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--wandb_project", type=str, default="transfuser-truckscenes")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="Run name (default: wandb auto)")
+    # Resume — 같은 work_dir + 같은 wandb run으로 ckpt 이어서 학습
+    parser.add_argument("--resume", type=str, default=None,
+                        help="checkpoint 경로 (e.g., work_dirs/<run>/checkpoints/epoch5.pt)")
 
     args = parser.parse_args()
 

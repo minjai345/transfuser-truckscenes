@@ -1,6 +1,9 @@
 # Large files
-checkpoint_epoch5.pt
 data/
+viz/
+wandb/
+work_dirs/
+logs/
 
 # Python
 __pycache__/
@@ -9,3 +12,6 @@ __pycache__/
 
 # Environment
 .env
+
+# 일회성 검증/디버깅 스크립트 — git 추적 안 함
+tools/checks/

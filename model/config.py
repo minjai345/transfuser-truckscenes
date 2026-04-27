@@ -72,6 +72,10 @@ class TransfuserConfig:
     agent_class_weight: float = 10.0
     agent_box_weight: float = 1.0
     bev_semantic_weight: float = 0.0  # disabled: no HD map
+    # ego_trailer 미래 trajectory L1 loss 가중치.
+    # truck trajectory와 동일한 10.0으로 설정하되, trailer 없는 sample은
+    # mask=0이라 자동 제외되므로 batch별 학습 신호는 비례적으로 줄어듦.
+    trailer_weight: float = 10.0
 
     # BEV mapping (kept for model architecture, but not trained)
     bev_pixel_width: int = 256

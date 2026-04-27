@@ -139,6 +139,8 @@ def run_evaluation(
     # Metrics accumulators
     l2_errors = {h: [] for h in EVAL_HORIZONS}
     collisions = {h: [] for h in EVAL_HORIZONS}
+    # trailer L2: trailer_mask=1인 sample에서만 집계 (with-trailer scene만 포함)
+    trailer_l2_errors = {h: [] for h in EVAL_HORIZONS}
 
     num_samples = len(dataset)
     if verbose:
@@ -159,6 +161,18 @@ def run_evaluation(
                 pred_traj = predictions["trajectory"][0].cpu().numpy()  # (8, 3)
                 gt_traj = targets["trajectory"].numpy()  # (8, 3)
 
+                # trailer prediction (선택적). target에 mask=1일 때만 metric에 포함.
+                trailer_mask = float(targets.get("trailer_mask", torch.tensor(0.0)).item())
+                pred_trailer = None
+                gt_trailer = None
+                if (
+                    "trailer_trajectory" in predictions
+                    and "trailer_trajectory" in targets
+                    and trailer_mask > 0.5
+                ):
+                    pred_trailer = predictions["trailer_trajectory"][0].cpu().numpy()
+                    gt_trailer = targets["trailer_trajectory"].numpy()
+
                 for h in EVAL_HORIZONS:
                     idx = horizon_indices[h]
 
@@ -171,6 +185,11 @@ def run_evaluation(
                     )
                     collisions[h].append(float(collision))
 
+                    # trailer L2 (mask=1 sample만)
+                    if pred_trailer is not None:
+                        tl2 = np.linalg.norm(pred_trailer[idx, :2] - gt_trailer[idx, :2])
+                        trailer_l2_errors[h].append(tl2)
+
                 if verbose and (i + 1) % log_interval == 0:
                     print(f"  [{i + 1}/{num_samples}]")
     finally:
@@ -180,6 +199,7 @@ def run_evaluation(
     metrics = {}
     l2_means = []
     col_means = []
+    trailer_means = []
     for h in EVAL_HORIZONS:
         l2_m = float(np.mean(l2_errors[h])) if l2_errors[h] else float("nan")
         col_m = float(np.mean(collisions[h])) * 100 if collisions[h] else float("nan")
@@ -187,8 +207,23 @@ def run_evaluation(
         metrics[f"col/{int(h)}s"] = col_m
         l2_means.append(l2_m)
         col_means.append(col_m)
+
+        # trailer L2 — sample 수가 충분할 때만 의미 있음
+        if trailer_l2_errors[h]:
+            t_m = float(np.mean(trailer_l2_errors[h]))
+            metrics[f"trailer_l2/{int(h)}s"] = t_m
+            trailer_means.append(t_m)
+        else:
+            metrics[f"trailer_l2/{int(h)}s"] = float("nan")
+
     metrics["l2/avg"] = float(np.mean(l2_means))
     metrics["col/avg"] = float(np.mean(col_means))
+    if trailer_means:
+        metrics["trailer_l2/avg"] = float(np.mean(trailer_means))
+        metrics["trailer_l2/count"] = float(len(trailer_l2_errors[EVAL_HORIZONS[0]]))
+    else:
+        metrics["trailer_l2/avg"] = float("nan")
+        metrics["trailer_l2/count"] = 0.0
 
     if verbose:
         _print_results(metrics)
@@ -198,29 +233,43 @@ def run_evaluation(
 
 def _print_results(metrics):
     """Pretty-print evaluation metrics."""
-    print("\n" + "=" * 55)
+    print("\n" + "=" * 60)
     print("Evaluation Results")
-    print("=" * 55)
+    print("=" * 60)
 
-    print("\nL2 (m) ", end="")
+    print("\nTruck L2 (m) ", end="")
     for h in EVAL_HORIZONS:
         print(f"| {h:.0f}s     ", end="")
     print("| Avg")
-    print("-" * 55)
-    print("       ", end="")
+    print("-" * 60)
+    print("             ", end="")
     for h in EVAL_HORIZONS:
         print(f"| {metrics[f'l2/{int(h)}s']:<7.2f}", end="")
     print(f"| {metrics['l2/avg']:.2f}")
 
-    print("\nCol (%) ", end="")
+    print("\nCol (%)      ", end="")
     for h in EVAL_HORIZONS:
         print(f"| {h:.0f}s     ", end="")
     print("| Avg")
-    print("-" * 55)
-    print("       ", end="")
+    print("-" * 60)
+    print("             ", end="")
     for h in EVAL_HORIZONS:
         print(f"| {metrics[f'col/{int(h)}s']:<7.2f}", end="")
     print(f"| {metrics['col/avg']:.2f}")
+
+    # Trailer L2 (with-trailer sample만 평균; nan이면 trailer 없는 set)
+    n_trailer = int(metrics.get("trailer_l2/count", 0))
+    if n_trailer > 0:
+        print(f"\nTrailer L2 (m) [n={n_trailer}] ", end="")
+        for h in EVAL_HORIZONS:
+            print(f"| {h:.0f}s     ", end="")
+        print("| Avg")
+        print("-" * 60)
+        print("             ", end="")
+        for h in EVAL_HORIZONS:
+            v = metrics.get(f"trailer_l2/{int(h)}s", float("nan"))
+            print(f"| {v:<7.2f}", end="")
+        print(f"| {metrics['trailer_l2/avg']:.2f}")
     print()
 
 

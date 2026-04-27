@@ -115,17 +115,25 @@ class TruckScenesDataset(Dataset):
         # === Targets ===
         trajectory = self._get_trajectory_target(sample)
         agent_states, agent_labels = self._get_agent_targets(sample)
+        trailer_trajectory, trailer_mask = self._get_trailer_trajectory_target(sample)
 
         targets = {
             "trajectory": trajectory,
             "agent_states": agent_states,
             "agent_labels": agent_labels,
+            # ego_trailer 미래 trajectory (트랙터 ego frame).
+            # trailer 없는 sample은 zeros + mask=0이라 loss에서 자동 제외됨.
+            "trailer_trajectory": trailer_trajectory,
+            "trailer_mask": trailer_mask,
         }
 
         return features, targets
 
     def _get_camera_feature(self, sample: dict) -> torch.Tensor:
-        """Load 4 cameras, crop front pair directionally, stitch, resize."""
+        """Load 4 cameras, crop front pair directionally, stitch, resize.
+
+        NavSim transfuser_features.py와 동일하게 ToTensor만 적용 (mean/std normalize X).
+        """
         images = []
         for channel, crop_side in CAMERA_CHANNELS:
             cam_token = sample["data"][channel]
@@ -210,13 +218,78 @@ class TruckScenesDataset(Dataset):
         return torch.tensor(features)
 
     def _get_status_feature(self, sample: dict) -> torch.Tensor:
-        """Construct ego status feature: [vx, vy, ax, ay] from CAN data."""
+        """Construct ego status feature: [vx, vy, ax, ay].
+
+        vx, vy: ego_pose translation의 centered difference로 직접 계산.
+                (chassis CAN bus의 vx/vy는 ~32% sample에서 0으로 stuck — 데이터 품질 이슈.
+                 측정: tools/checks/check_chassis_zero_rate.py.
+                 devkit의 box_velocity와 동일 패턴 적용.)
+        ax, ay: chassis IMU 그대로 (가속도는 신뢰 가능).
+        """
         lidar_channel = _get_reference_channel(sample)
         sd = self._ts.get("sample_data", sample["data"][lidar_channel])
 
+        # ax, ay는 chassis IMU 그대로
         chassis = self._ts.getclosest("ego_motion_chassis", sd["timestamp"])
-        status = [chassis["vx"], chassis["vy"], chassis["ax"], chassis["ay"]]
-        return torch.tensor(status, dtype=torch.float32)
+        ax, ay = float(chassis["ax"]), float(chassis["ay"])
+
+        # vx, vy — ego_pose 미분
+        vx, vy = self._estimate_ego_velocity(sample)
+        return torch.tensor([vx, vy, ax, ay], dtype=torch.float32)
+
+    def _estimate_ego_velocity(self, sample: dict, max_time_diff: float = 1.5):
+        """ego_pose translation의 centered difference로 ego velocity (ego frame).
+
+        devkit truckscenes.box_velocity (truckscenes-devkit/.../truckscenes.py:443)
+        와 동일 로직:
+          - prev + next 모두 있으면 centered difference (max_time_diff × 2 허용)
+          - 한쪽만 있으면 forward/backward
+          - time_diff > max_time_diff면 0 fallback (학습 입력에 nan은 곤란)
+        """
+        lidar_channel = _get_reference_channel(sample)
+        sd_cur = self._ts.get("sample_data", sample["data"][lidar_channel])
+        cur_ep = self._ts.get("ego_pose", sd_cur["ego_pose_token"])
+        cur_yaw = _quaternion_to_yaw(Quaternion(cur_ep["rotation"]))
+
+        has_prev = sample.get("prev", "") != ""
+        has_next = sample.get("next", "") != ""
+        if not has_prev and not has_next:
+            return 0.0, 0.0
+
+        # first(prev or current) translation/timestamp
+        if has_prev:
+            prev_s = self._ts.get("sample", sample["prev"])
+            prev_sd = self._ts.get("sample_data", prev_s["data"][lidar_channel])
+            prev_ep = self._ts.get("ego_pose", prev_sd["ego_pose_token"])
+            first_pos = np.array(prev_ep["translation"][:2])
+            first_t = prev_sd["timestamp"]
+        else:
+            first_pos = np.array(cur_ep["translation"][:2])
+            first_t = sd_cur["timestamp"]
+
+        # last(next or current)
+        if has_next:
+            next_s = self._ts.get("sample", sample["next"])
+            next_sd = self._ts.get("sample_data", next_s["data"][lidar_channel])
+            next_ep = self._ts.get("ego_pose", next_sd["ego_pose_token"])
+            last_pos = np.array(next_ep["translation"][:2])
+            last_t = next_sd["timestamp"]
+        else:
+            last_pos = np.array(cur_ep["translation"][:2])
+            last_t = sd_cur["timestamp"]
+
+        dt = (last_t - first_t) / 1e6  # μs → s
+        if has_prev and has_next:
+            max_time_diff *= 2
+        if dt <= 0 or dt > max_time_diff:
+            return 0.0, 0.0
+
+        # global → ego frame (current ego yaw 기준 회전)
+        v_global = (last_pos - first_pos) / dt
+        cos_y, sin_y = np.cos(-cur_yaw), np.sin(-cur_yaw)
+        vx = v_global[0] * cos_y - v_global[1] * sin_y
+        vy = v_global[0] * sin_y + v_global[1] * cos_y
+        return float(vx), float(vy)
 
     def _get_trajectory_target(self, sample: dict) -> torch.Tensor:
         """Compute future trajectory in ego-centric coordinates."""
@@ -315,6 +388,79 @@ class TruckScenesDataset(Dataset):
             agent_labels[: len(arr)] = 1.0
 
         return torch.tensor(agent_states), torch.tensor(agent_labels)
+
+    def _get_trailer_trajectory_target(self, sample: dict) -> Tuple[torch.Tensor, torch.Tensor]:
+        """미래 num_future_samples keyframe의 ego_trailer 박스를 트랙터 ego frame에서 chain.
+
+        반환:
+            trajectory: (num_future_samples, 3) — (x, y, heading) per future frame.
+            mask: scalar — 현재 sample에 ego_trailer가 있고 supervision 가능하면 1.0, 아니면 0.0.
+
+        - "trailer 없는 scene"이면 즉시 zeros + mask=0 반환.
+        - 미래 frame에서 같은 instance의 trailer를 못 찾으면 마지막 유효 pose로 padding (NavSim 패턴 일치).
+        - 좌표/heading 모두 *현재* 트랙터 ego frame 기준 (글로벌 → ego 변환).
+        """
+        lidar_channel = _get_reference_channel(sample)
+        sd = self._ts.get("sample_data", sample["data"][lidar_channel])
+
+        # 1) 현재 sample에서 ego_trailer instance_token 찾기
+        trailer_instance_token = None
+        for box in self._ts.get_boxes(sd["token"]):
+            if box.name == "vehicle.ego_trailer":
+                ann = self._ts.get("sample_annotation", box.token)
+                trailer_instance_token = ann["instance_token"]
+                break
+
+        trajectory = np.zeros((self._num_future_samples, 3), dtype=np.float32)
+        if trailer_instance_token is None:
+            # trailer 없는 scene → mask=0
+            return torch.tensor(trajectory), torch.tensor(0.0, dtype=torch.float32)
+
+        # 2) 현재 트랙터 ego_pose
+        current_ego = self._ts.get("ego_pose", sd["ego_pose_token"])
+        current_pos = np.array(current_ego["translation"][:2])
+        current_yaw = _quaternion_to_yaw(Quaternion(current_ego["rotation"]))
+
+        # 3) 미래 frame chain — 같은 instance_token의 trailer box 따라가며 (x, y, heading) 변환
+        next_token = sample.get("next", "")
+        for i in range(self._num_future_samples):
+            if not next_token:
+                if i > 0:
+                    trajectory[i] = trajectory[i - 1]
+                continue
+
+            next_sample = self._ts.get("sample", next_token)
+            next_sd = self._ts.get("sample_data", next_sample["data"][lidar_channel])
+
+            trailer_box = None
+            for nb in self._ts.get_boxes(next_sd["token"]):
+                if nb.name != "vehicle.ego_trailer":
+                    continue
+                ann = self._ts.get("sample_annotation", nb.token)
+                if ann["instance_token"] == trailer_instance_token:
+                    trailer_box = nb
+                    break
+
+            if trailer_box is None:
+                # chain 끊김 — 마지막 유효 pose로 padding
+                if i > 0:
+                    trajectory[i] = trajectory[i - 1]
+                next_token = next_sample.get("next", "")
+                continue
+
+            # 글로벌 → 현재 트랙터 ego frame
+            delta = trailer_box.center[:2] - current_pos
+            cos_y, sin_y = np.cos(-current_yaw), np.sin(-current_yaw)
+            local_x = delta[0] * cos_y - delta[1] * sin_y
+            local_y = delta[0] * sin_y + delta[1] * cos_y
+
+            trailer_yaw = _quaternion_to_yaw(trailer_box.orientation)
+            local_heading = (trailer_yaw - current_yaw + np.pi) % (2 * np.pi) - np.pi
+
+            trajectory[i] = [local_x, local_y, local_heading]
+            next_token = next_sample.get("next", "")
+
+        return torch.tensor(trajectory), torch.tensor(1.0, dtype=torch.float32)
 
 
 def _crop_to_aspect(

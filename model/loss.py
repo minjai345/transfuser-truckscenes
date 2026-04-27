@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -8,22 +8,60 @@ from model.config import TransfuserConfig
 from model.enums import BoundingBox2DIndex
 
 
-def transfuser_loss(targets: Dict[str, torch.Tensor], predictions: Dict[str, torch.Tensor], config: TransfuserConfig):
-    trajectory_loss = F.l1_loss(predictions["trajectory"], targets["trajectory"])
-    agent_class_loss, agent_box_loss = _agent_loss(targets, predictions, config)
+def transfuser_loss(
+    targets: Dict[str, torch.Tensor],
+    predictions: Dict[str, torch.Tensor],
+    config: TransfuserConfig,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Loss 합산 + component breakdown 반환.
+
+    반환:
+        loss: scalar tensor — backward 대상 (가중합).
+        components: dict — un-weighted loss 항. 학습 로그/wandb에 분리 출력용.
+            keys: "truck_l1", "agent_cls", "agent_box", (옵션) "trailer_l1", "bev_semantic".
+    """
+    truck_l1 = F.l1_loss(predictions["trajectory"], targets["trajectory"])
+    agent_cls, agent_box = _agent_loss(targets, predictions, config)
+
+    components: Dict[str, torch.Tensor] = {
+        "truck_l1": truck_l1,
+        "agent_cls": agent_cls,
+        "agent_box": agent_box,
+    }
 
     loss = (
-        config.trajectory_weight * trajectory_loss
-        + config.agent_class_weight * agent_class_loss
-        + config.agent_box_weight * agent_box_loss
+        config.trajectory_weight * truck_l1
+        + config.agent_class_weight * agent_cls
+        + config.agent_box_weight * agent_box
     )
+
+    # Trailer trajectory loss (mask 처리)
+    # - trailer 있는 sample만 supervision (mask=1)
+    # - trailer 없는 sample은 mask=0이라 분자 0
+    # - denom은 batch 내 mask=1 sample 수 (0-divide 방지 위해 1로 clamp)
+    if (
+        config.trailer_weight > 0
+        and "trailer_trajectory" in predictions
+        and "trailer_trajectory" in targets
+        and "trailer_mask" in targets
+    ):
+        pred_t = predictions["trailer_trajectory"]   # (B, num_poses, 3)
+        gt_t = targets["trailer_trajectory"]         # (B, num_poses, 3)
+        mask = targets["trailer_mask"]               # (B,)
+
+        per_sample = F.l1_loss(pred_t, gt_t, reduction="none").mean(dim=(-1, -2))
+        denom = mask.sum().clamp(min=1.0)
+        trailer_l1 = (per_sample * mask).sum() / denom
+        components["trailer_l1"] = trailer_l1
+        loss = loss + config.trailer_weight * trailer_l1
 
     # BEV semantic loss (optional, disabled by default for TruckScenes)
     if config.bev_semantic_weight > 0 and "bev_semantic_map" in targets:
-        bev_semantic_loss = F.cross_entropy(predictions["bev_semantic_map"], targets["bev_semantic_map"].long())
-        loss += config.bev_semantic_weight * bev_semantic_loss
+        bev_loss = F.cross_entropy(predictions["bev_semantic_map"], targets["bev_semantic_map"].long())
+        components["bev_semantic"] = bev_loss
+        loss = loss + config.bev_semantic_weight * bev_loss
 
-    return loss
+    return loss, components
 
 
 def _agent_loss(targets: Dict[str, torch.Tensor], predictions: Dict[str, torch.Tensor], config: TransfuserConfig):

@@ -15,9 +15,13 @@ class TransfuserModel(nn.Module):
     def __init__(self, config: TransfuserConfig):
         super().__init__()
 
+        # Query 구성: [truck trajectory(1), trailer trajectory(1), agents(N)]
+        # truck/trailer를 별도 query로 분리해 각자 다른 head로 회귀.
+        # trailer query는 현재 sample에 ego_trailer 없으면 loss에서 mask=0으로 제외됨.
         self._query_splits = [
-            1,
-            config.num_bounding_boxes,
+            1,                          # truck trajectory query
+            1,                          # trailer trajectory query
+            config.num_bounding_boxes,  # agent detection queries
         ]
 
         self._config = config
@@ -78,6 +82,14 @@ class TransfuserModel(nn.Module):
             d_model=config.tf_d_model,
         )
 
+        # Trailer trajectory head — truck head와 동일 구조, 별도 파라미터.
+        # 같은 query feature space를 공유하지만 출력 head를 분리해 truck/trailer를 따로 학습.
+        self._trailer_trajectory_head = TrajectoryHead(
+            num_poses=config.num_poses,
+            d_ffn=config.tf_d_ffn,
+            d_model=config.tf_d_model,
+        )
+
     def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         camera_feature: torch.Tensor = features["camera_feature"]
         if self._config.latent:
@@ -100,13 +112,20 @@ class TransfuserModel(nn.Module):
         query = self._query_embedding.weight[None, ...].repeat(batch_size, 1, 1)
         query_out = self._tf_decoder(query, keyval)
 
-        trajectory_query, agents_query = query_out.split(self._query_splits, dim=1)
+        # query_splits 순서: [truck, trailer, agents]
+        trajectory_query, trailer_query, agents_query = query_out.split(self._query_splits, dim=1)
 
         output: Dict[str, torch.Tensor] = {}
         if self._config.bev_semantic_weight > 0:
             output["bev_semantic_map"] = self._bev_semantic_head(bev_feature_upscale)
+
+        # Truck trajectory: 기존 키 "trajectory" 유지
         trajectory = self._trajectory_head(trajectory_query)
         output.update(trajectory)
+
+        # Trailer trajectory: TrajectoryHead가 {"trajectory": ...}를 반환하므로 키 변경
+        trailer_pred = self._trailer_trajectory_head(trailer_query)
+        output["trailer_trajectory"] = trailer_pred["trajectory"]
 
         agents = self._agent_head(agents_query)
         output.update(agents)
