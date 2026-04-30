@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 # 프로젝트 루트를 path에 추가 (tools/에서 실행 시)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from model.config import TransfuserConfig
+from configs._base import TransfuserConfig
 from dataset.dataset import TruckScenesDataset
 
 

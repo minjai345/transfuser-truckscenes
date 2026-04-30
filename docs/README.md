@@ -26,6 +26,7 @@
 | [`03-truckscenes-adaptation.md`](03-truckscenes-adaptation.md) | TruckScenes에 어떻게 적용했는지 단계별 가이드 (센서 매핑·데이터 파이프라인·target 생성·좌표계) |
 | [`04-current-port-review.md`](04-current-port-review.md) | 현재 코드 검토 결과: NavSim과 정합한 부분 / 의도적 일탈 / 발견된 갭 / 개선 권고 |
 | [`05-implementation-checklist.md`](05-implementation-checklist.md) | 학습·평가·시각화 실행 체크리스트와 정상 학습 곡선 형태 |
+| [`06-baseline-validation.md`](06-baseline-validation.md) | trailer_v3 ep12 vs constant-velocity 비교 — 곡률 분포 분석과 stratified eval로 baseline 자격 검증 |
 
 ---
 

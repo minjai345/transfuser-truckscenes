@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
-from model.config import TransfuserConfig
+from configs._base import TransfuserConfig
 from dataset.dataset import TruckScenesDataset
 
 

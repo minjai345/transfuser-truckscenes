@@ -16,7 +16,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from model.config import TransfuserConfig
+from configs import TransfuserConfig, load_config
 from model.model import TransfuserModel
 from model.loss import transfuser_loss, _agent_loss
 from dataset.dataset import TruckScenesDataset
@@ -27,7 +27,8 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    config = TransfuserConfig()
+    config = load_config(args.config)
+    print(f"Loaded config: configs/{args.config}.py")
 
     # Load dataset (val split: 작아서 로드 빠름)
     from truckscenes.truckscenes import TruckScenes
@@ -140,6 +141,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="v4_range",
+                        help="configs/{name}.py (default: v4_range)")
     parser.add_argument("--dataroot", type=str, required=True)
     parser.add_argument("--version", type=str, default="v1.1-trainval")
     parser.add_argument("--num_samples", type=int, default=4)

@@ -2,16 +2,20 @@
 Evaluation script for TransFuser on MAN TruckScenes.
 Metrics: L2 displacement error and collision rate at 1s, 2s, 3s.
 Following the standard open-loop planning evaluation protocol (UniAD, VAD, ST-P3).
+
+추가: 학습 중 입력별 기여도 추적용 input ablation 평가 (run_input_ablation_eval).
+status / camera / lidar 각각을 0으로 마스킹한 상태에서 L2를 측정해 wandb로 logging 가능.
 """
 
 import argparse
+import random
 
 import numpy as np
 import torch
 from pyquaternion import Quaternion
 from shapely.geometry import Polygon
 
-from model.config import TransfuserConfig
+from configs import TransfuserConfig, load_config
 from model.model import TransfuserModel
 from dataset.dataset import (
     TruckScenesDataset,
@@ -231,6 +235,170 @@ def run_evaluation(
     return metrics
 
 
+def _mask_features_for_ablation(features_batched: dict, mode: str) -> dict:
+    """주어진 mode에 따라 batched feature dict의 한 입력을 0으로 마스킹.
+    mode: "full" | "no_status" | "no_camera" | "no_lidar"
+    """
+    out = dict(features_batched)
+    if mode == "full":
+        return out
+    if mode == "no_status":
+        out["status_feature"] = torch.zeros_like(features_batched["status_feature"])
+    elif mode == "no_camera":
+        out["camera_feature"] = torch.zeros_like(features_batched["camera_feature"])
+    elif mode == "no_lidar":
+        out["lidar_feature"] = torch.zeros_like(features_batched["lidar_feature"])
+    else:
+        raise ValueError(f"unknown ablation mode: {mode}")
+    return out
+
+
+def run_input_ablation_eval(
+    model,
+    dataset,
+    config,
+    device,
+    ts=None,
+    num_subset: int = 200,
+    seed: int = 0,
+    modes=("full", "no_status", "no_camera", "no_lidar"),
+    ego_length: float = 6.9,
+    ego_width: float = 2.5,
+    verbose: bool = True,
+):
+    """학습 중 입력별 기여도 추적용 가벼운 ablation 평가.
+
+    val에서 num_subset개를 무작위로 골라(seed 고정 → 매 epoch 같은 sample 사용),
+    각 mode에서 L2(1/2/3s + avg)와 collision rate(1/2/3s + avg)를 측정한다.
+    학습 중 매 epoch eval에서 호출 가능.
+
+    Collision은 ts(TruckScenes 인스턴스)가 주어졌을 때만 계산 — devkit `get_boxes`로
+    미래 agent box를 가져와 polygon intersection 검사. 한 sample × 3 horizon의 box를
+    한 번만 로드해 4 mode에서 재사용 (per-mode 비용은 polygon 검사뿐 → 거의 무료).
+
+    Returns:
+        {
+          "ablation/{mode}_l2_{1s,2s,3s,avg}": float,
+          "ablation/{mode}_trailer_l2_{1s,2s,3s,avg}": float,  # mask=1 sample만
+          "ablation/{mode}_col_{1s,2s,3s,avg}": float,         # ts 제공 시. 단위 %
+        }
+    """
+    horizon_indices = {
+        h: int(h / config.trajectory_sampling_interval) - 1 for h in EVAL_HORIZONS
+    }
+
+    # 매 epoch 같은 sample을 비교해야 노이즈 적음 → seed 고정
+    n = len(dataset)
+    if num_subset >= n:
+        indices = list(range(n))
+    else:
+        rng = random.Random(seed)
+        indices = rng.sample(range(n), num_subset)
+        indices.sort()
+
+    if verbose:
+        print(f"[ablation] {len(indices)} sample × {len(modes)} modes"
+              f"{' + collision' if ts is not None else ' (no collision: ts=None)'}")
+
+    # ====== 1단계: agent box를 sample × horizon마다 한 번만 로드 (캐시) ======
+    # 4 mode에서 같은 box를 재사용 → 4× 비용을 1×로 절감
+    box_cache = {}  # (idx, horizon_step_idx) -> List[(x, y, h, l, w)]
+    if ts is not None:
+        if verbose:
+            print(f"  caching future agent boxes (idx × {len(EVAL_HORIZONS)} horizons)...")
+        for idx in indices:
+            sample_token = dataset._sample_tokens[idx]
+            for h in EVAL_HORIZONS:
+                k = horizon_indices[h]
+                box_cache[(idx, k)] = _get_future_agent_boxes(
+                    ts, sample_token, k, config
+                )
+
+    metrics = {}
+    prev_mode = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for mode in modes:
+                truck_l2 = {h: [] for h in EVAL_HORIZONS}
+                trailer_l2 = {h: [] for h in EVAL_HORIZONS}
+                col = {h: [] for h in EVAL_HORIZONS}
+                for idx in indices:
+                    features, targets = dataset[idx]
+                    features_batched = {
+                        k: v.unsqueeze(0).to(device) for k, v in features.items()
+                    }
+                    features_masked = _mask_features_for_ablation(features_batched, mode)
+                    preds = model(features_masked)
+
+                    pred_traj = preds["trajectory"][0].cpu().numpy()
+                    gt_traj = targets["trajectory"].numpy()
+
+                    trailer_mask = float(
+                        targets.get("trailer_mask", torch.tensor(0.0)).item()
+                    )
+                    pred_trailer = None
+                    gt_trailer = None
+                    if (
+                        "trailer_trajectory" in preds
+                        and "trailer_trajectory" in targets
+                        and trailer_mask > 0.5
+                    ):
+                        pred_trailer = preds["trailer_trajectory"][0].cpu().numpy()
+                        gt_trailer = targets["trailer_trajectory"].numpy()
+
+                    for h in EVAL_HORIZONS:
+                        k = horizon_indices[h]
+                        truck_l2[h].append(
+                            float(np.linalg.norm(pred_traj[k, :2] - gt_traj[k, :2]))
+                        )
+                        if pred_trailer is not None:
+                            trailer_l2[h].append(
+                                float(np.linalg.norm(
+                                    pred_trailer[k, :2] - gt_trailer[k, :2]
+                                ))
+                            )
+                        if ts is not None:
+                            agent_boxes = box_cache[(idx, k)]
+                            collided = _check_collision(
+                                pred_traj[k], ego_length, ego_width, agent_boxes,
+                            )
+                            col[h].append(float(collided))
+
+                truck_means = []
+                trailer_means = []
+                col_means = []
+                for h in EVAL_HORIZONS:
+                    tm = float(np.mean(truck_l2[h])) if truck_l2[h] else float("nan")
+                    metrics[f"ablation/{mode}_l2_{int(h)}s"] = tm
+                    truck_means.append(tm)
+                    if trailer_l2[h]:
+                        rm = float(np.mean(trailer_l2[h]))
+                        metrics[f"ablation/{mode}_trailer_l2_{int(h)}s"] = rm
+                        trailer_means.append(rm)
+                    if ts is not None and col[h]:
+                        cm = float(np.mean(col[h])) * 100  # 퍼센트로
+                        metrics[f"ablation/{mode}_col_{int(h)}s"] = cm
+                        col_means.append(cm)
+                metrics[f"ablation/{mode}_l2_avg"] = float(np.mean(truck_means))
+                if trailer_means:
+                    metrics[f"ablation/{mode}_trailer_l2_avg"] = float(
+                        np.mean(trailer_means)
+                    )
+                if col_means:
+                    metrics[f"ablation/{mode}_col_avg"] = float(np.mean(col_means))
+
+                if verbose:
+                    avg_t = metrics[f"ablation/{mode}_l2_avg"]
+                    avg_r = metrics.get(f"ablation/{mode}_trailer_l2_avg", float("nan"))
+                    avg_c = metrics.get(f"ablation/{mode}_col_avg", float("nan"))
+                    print(f"  [{mode:<10}] truck={avg_t:.3f}m  trailer={avg_r:.3f}m  col={avg_c:.2f}%")
+    finally:
+        model.train(prev_mode)
+
+    return metrics
+
+
 def _print_results(metrics):
     """Pretty-print evaluation metrics."""
     print("\n" + "=" * 60)
@@ -277,7 +445,8 @@ def evaluate(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    config = TransfuserConfig()
+    config = load_config(args.config)
+    print(f"Loaded config: configs/{args.config}.py")
 
     from truckscenes.truckscenes import TruckScenes
     print(f"Loading TruckScenes {args.version} from {args.dataroot}...")
@@ -318,6 +487,9 @@ def evaluate(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate TransFuser on TruckScenes")
+    parser.add_argument("--config", type=str, default="v4_range",
+                        help="configs/{name}.py (default: v4_range). "
+                             "ckpt 학습에 쓴 버전과 일치해야 함.")
     parser.add_argument("--dataroot", type=str, required=True)
     parser.add_argument("--version", type=str, default="v1.0-mini")
     parser.add_argument("--checkpoint", type=str, required=True)

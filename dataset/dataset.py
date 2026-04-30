@@ -16,7 +16,7 @@ from pyquaternion import Quaternion
 
 from truckscenes.utils.data_classes import LidarPointCloud
 
-from model.config import TransfuserConfig
+from configs._base import TransfuserConfig
 from model.enums import BoundingBox2DIndex
 
 

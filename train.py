@@ -13,11 +13,11 @@ from typing import Dict
 import torch
 from torch.utils.data import DataLoader
 
-from model.config import TransfuserConfig
+from configs import TransfuserConfig, load_config
 from model.model import TransfuserModel
 from model.loss import transfuser_loss
 from dataset.dataset import TruckScenesDataset
-from evaluate import run_evaluation
+from evaluate import run_evaluation, run_input_ablation_eval
 
 # wandb는 optional — 설치 안됐거나 --wandb 미지정이면 비활성화 상태로 동작
 try:
@@ -109,8 +109,9 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Config
-    config = TransfuserConfig()
+    # Config — `--config <name>`로 configs/{name}.py 선택 (default: latest stable).
+    config = load_config(args.config)
+    print(f"Loaded config: configs/{args.config}.py")
 
     # resume용 ckpt 미리 로드 (wandb run id 필요해서 wandb.init보다 먼저)
     resume_ckpt = None
@@ -304,11 +305,30 @@ def train(args):
         eval_elapsed = time.time() - eval_start
         print(f"Eval done in {eval_elapsed:.1f}s")
 
+        # Input ablation: status / camera / lidar 기여도 추적 (subset 200 sample)
+        # status dropout이 의도대로 vision/lidar branch 학습을 강제하는지 wandb 곡선으로 검증.
+        # collision은 LiDAR가 실제로 obstacle 회피에 기여하는지 확인용 (L2엔 안 보여도 col에선 보일 수 있음).
+        ablation_start = time.time()
+        ablation_metrics = run_input_ablation_eval(
+            model=model,
+            dataset=val_dataset,
+            config=config,
+            device=device,
+            ts=ts,
+            num_subset=args.ablation_num_samples,
+            ego_length=args.ego_length,
+            ego_width=args.ego_width,
+            verbose=True,
+        )
+        print(f"Ablation eval done in {time.time() - ablation_start:.1f}s")
+
         if use_wandb:
             wandb.log(
                 {f"val/{k}": v for k, v in val_metrics.items()},
                 step=global_step,
             )
+            # ablation_metrics는 이미 "ablation/..." prefix 키이므로 그대로 logging
+            wandb.log(ablation_metrics, step=global_step)
 
         # Save checkpoint (work_dir/checkpoints/)
         if (epoch + 1) % args.save_interval == 0:
@@ -337,7 +357,8 @@ def sanity_check(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"=== Sanity Check (device: {device}) ===")
 
-    config = TransfuserConfig()
+    config = load_config(args.config)
+    print(f"Loaded config: configs/{args.config}.py")
 
     from truckscenes.truckscenes import TruckScenes
     print(f"Loading TruckScenes {args.version}...")
@@ -392,6 +413,9 @@ def sanity_check(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TransFuser on TruckScenes")
+    parser.add_argument("--config", type=str, default="v4_range",
+                        help="configs/{name}.py 의 stem (e.g. v3_baseline, v4_range). "
+                             "default: 최신 stable 버전.")
     parser.add_argument("--dataroot", type=str, required=True, default="./data", help="Path to TruckScenes data")
     parser.add_argument("--version", type=str, default="v1.0-mini", help="TruckScenes version")
     parser.add_argument("--batch_size", type=int, default=4)
@@ -407,6 +431,9 @@ if __name__ == "__main__":
     # Validation (매 epoch 끝에 실행)
     parser.add_argument("--ego_length", type=float, default=6.9, help="Ego vehicle length (m)")
     parser.add_argument("--ego_width", type=float, default=2.5, help="Ego vehicle width (m)")
+    # Input ablation eval (매 epoch eval과 함께 실행, subset에 4-mode L2 측정해 wandb log)
+    parser.add_argument("--ablation_num_samples", type=int, default=200,
+                        help="Ablation eval에서 사용할 val subset 크기 (작을수록 빠름)")
     # wandb 관련 플래그
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--wandb_project", type=str, default="transfuser-truckscenes")

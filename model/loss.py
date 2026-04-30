@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
-from model.config import TransfuserConfig
+from configs._base import TransfuserConfig
 from model.enums import BoundingBox2DIndex
 
 

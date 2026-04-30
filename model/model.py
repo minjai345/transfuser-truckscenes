@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from model.backbone import TransfuserBackbone
-from model.config import TransfuserConfig
+from configs._base import TransfuserConfig
 from model.enums import BoundingBox2DIndex, StateSE2Index
 
 
@@ -15,14 +15,15 @@ class TransfuserModel(nn.Module):
     def __init__(self, config: TransfuserConfig):
         super().__init__()
 
-        # Query 구성: [truck trajectory(1), trailer trajectory(1), agents(N)]
+        # Query 구성: [truck trajectory(1), (선택) trailer trajectory(1), agents(N)]
         # truck/trailer를 별도 query로 분리해 각자 다른 head로 회귀.
         # trailer query는 현재 sample에 ego_trailer 없으면 loss에서 mask=0으로 제외됨.
-        self._query_splits = [
-            1,                          # truck trajectory query
-            1,                          # trailer trajectory query
-            config.num_bounding_boxes,  # agent detection queries
-        ]
+        # `use_trailer_head=False`이면 trailer slot 자체를 query에서 빼고 head도 빌드 안 함
+        # → paper의 strict truck-only baseline용.
+        self._query_splits = [1]                     # truck trajectory query
+        if config.use_trailer_head:
+            self._query_splits.append(1)             # trailer trajectory query
+        self._query_splits.append(config.num_bounding_boxes)  # agent detection queries
 
         self._config = config
         self._backbone = TransfuserBackbone(config)
@@ -84,11 +85,13 @@ class TransfuserModel(nn.Module):
 
         # Trailer trajectory head — truck head와 동일 구조, 별도 파라미터.
         # 같은 query feature space를 공유하지만 출력 head를 분리해 truck/trailer를 따로 학습.
-        self._trailer_trajectory_head = TrajectoryHead(
-            num_poses=config.num_poses,
-            d_ffn=config.tf_d_ffn,
-            d_model=config.tf_d_model,
-        )
+        # `use_trailer_head=False`이면 빌드 자체를 skip → 모델 capacity가 truck-only로 줄어듦.
+        if config.use_trailer_head:
+            self._trailer_trajectory_head = TrajectoryHead(
+                num_poses=config.num_poses,
+                d_ffn=config.tf_d_ffn,
+                d_model=config.tf_d_model,
+            )
 
     def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         camera_feature: torch.Tensor = features["camera_feature"]
@@ -99,6 +102,17 @@ class TransfuserModel(nn.Module):
         status_feature: torch.Tensor = features["status_feature"]
 
         batch_size = status_feature.shape[0]
+
+        # Status dropout — 학습 시에만, sample-level로 status_feature 일부를 0으로 마스킹.
+        # 목적: status(vx,vy,ax,ay) → trajectory의 trivial mapping(vx·Δt)에만 의존하지 않고
+        #       image/lidar branch가 의미 있게 학습되도록 강제.
+        # 마스킹된 0은 학습에 자주 등장하므로 in-distribution이라 inference 영향 없음.
+        if self.training and self._config.status_dropout_p > 0.0:
+            keep_mask = (
+                torch.rand(batch_size, 1, device=status_feature.device)
+                > self._config.status_dropout_p
+            ).to(status_feature.dtype)
+            status_feature = status_feature * keep_mask
 
         bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
 
@@ -112,8 +126,13 @@ class TransfuserModel(nn.Module):
         query = self._query_embedding.weight[None, ...].repeat(batch_size, 1, 1)
         query_out = self._tf_decoder(query, keyval)
 
-        # query_splits 순서: [truck, trailer, agents]
-        trajectory_query, trailer_query, agents_query = query_out.split(self._query_splits, dim=1)
+        # query_splits 순서: [truck, (옵션) trailer, agents]. use_trailer_head 토글에 맞춤.
+        splits = query_out.split(self._query_splits, dim=1)
+        if self._config.use_trailer_head:
+            trajectory_query, trailer_query, agents_query = splits
+        else:
+            trajectory_query, agents_query = splits
+            trailer_query = None
 
         output: Dict[str, torch.Tensor] = {}
         if self._config.bev_semantic_weight > 0:
@@ -123,9 +142,11 @@ class TransfuserModel(nn.Module):
         trajectory = self._trajectory_head(trajectory_query)
         output.update(trajectory)
 
-        # Trailer trajectory: TrajectoryHead가 {"trajectory": ...}를 반환하므로 키 변경
-        trailer_pred = self._trailer_trajectory_head(trailer_query)
-        output["trailer_trajectory"] = trailer_pred["trajectory"]
+        # Trailer trajectory: 토글이 켜져 있을 때만 forward · 출력. 출력 키가 없으면
+        # loss.py / evaluate.py 둘 다 자동 skip (둘 다 키 존재 여부로 가드).
+        if self._config.use_trailer_head:
+            trailer_pred = self._trailer_trajectory_head(trailer_query)
+            output["trailer_trajectory"] = trailer_pred["trajectory"]
 
         agents = self._agent_head(agents_query)
         output.update(agents)

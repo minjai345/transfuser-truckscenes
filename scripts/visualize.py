@@ -26,10 +26,13 @@ def main():
     p.add_argument("--num", type=int, default=5)
     p.add_argument("--out", default="viz")
     p.add_argument("--split", default="val", choices=["train", "val"])
+    p.add_argument("--config", default="v4_range",
+                   help="configs/{name}.py (default: v4_range)")
     args = p.parse_args()
 
     cmd = [
         sys.executable, "tools/visualize.py",
+        "--config", args.config,
         "--dataroot", DATAROOT,
         "--version", VERSION,
         "--split", args.split,

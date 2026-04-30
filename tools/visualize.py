@@ -33,7 +33,7 @@ from truckscenes.utils.geometry_utils import (
     view_points,
 )
 
-from model.config import TransfuserConfig
+from configs import TransfuserConfig, load_config
 from model.model import TransfuserModel
 from model.enums import BoundingBox2DIndex
 from dataset.dataset import (
@@ -242,10 +242,12 @@ def _draw_camera_devkit(ax, ts, sample_token, channel,
 
 
 def _render_sample(sample_idx, features, targets, predictions, config, out_path,
-                   gt_categories=None, ts=None, sample_token=None):
+                   gt_categories=None, ts=None, sample_token=None,
+                   model_label=None):
     """한 샘플에 대해 camera 4개 + BEV 서브플롯 생성.
     카메라 박스 투영은 _draw_camera_devkit이 처리 (devkit Box.render 사용).
     BEV는 ego frame 5-tuple로 직접 그림 — 변경 없음.
+    model_label이 있으면 figure suptitle로 어떤 ckpt의 prediction인지 표시.
     """
     fig = plt.figure(figsize=(24, 14))
     gs = gridspec.GridSpec(2, 4, height_ratios=[1, 2.2], figure=fig, hspace=0.15)
@@ -411,6 +413,10 @@ def _render_sample(sample_idx, features, targets, predictions, config, out_path,
     ax_bev.grid(alpha=0.3)
     ax_bev.legend(loc="upper right", fontsize=9)
 
+    # 어떤 모델의 prediction인지 figure 상단에 박아둠 — 시각화 결과만 봐도 ckpt 식별 가능
+    if model_label:
+        fig.suptitle(f"model: {model_label}", fontsize=11, y=0.995)
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -418,7 +424,8 @@ def _render_sample(sample_idx, features, targets, predictions, config, out_path,
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = TransfuserConfig()
+    config = load_config(args.config)
+    print(f"Loaded config: configs/{args.config}.py")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -438,11 +445,19 @@ def main(args):
     print(f"Split '{args.split}': {len(dataset)} samples")
 
     model = None
+    model_label = None
     if args.checkpoint:
         model = TransfuserModel(config=config).to(device)
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"], strict=False)
         model.eval()
+        # ckpt 식별자: "<run_name> | epoch=N | step=K"
+        # run_name은 ckpt 경로의 work_dirs/<run>/checkpoints/X.pt에서 추출
+        ckpt_path = Path(args.checkpoint)
+        run_name = ckpt_path.parent.parent.name if ckpt_path.parent.name == "checkpoints" \
+            else ckpt_path.parent.name
+        model_label = (f"{run_name} | epoch={ckpt.get('epoch', '?')} "
+                       f"step={ckpt.get('global_step', '?')}")
         print(f"Loaded: {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
     step = max(len(dataset) // args.num, 1)
@@ -463,7 +478,8 @@ def main(args):
         out_path = out_dir / f"sample_{idx:05d}.png"
         _render_sample(idx, features, targets, predictions, config, out_path,
                        gt_categories=gt_categories,
-                       ts=ts, sample_token=sample_token)
+                       ts=ts, sample_token=sample_token,
+                       model_label=model_label)
         print(f"  saved: {out_path}")
 
     print(f"\n{args.num} visualizations saved to {out_dir}/")
@@ -471,6 +487,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="v4_range",
+                        help="configs/{name}.py (default: v4_range)")
     parser.add_argument("--dataroot", type=str, required=True)
     parser.add_argument("--version", type=str, default="v1.1-trainval")
     parser.add_argument("--split", type=str, default="val")

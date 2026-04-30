@@ -21,7 +21,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from model.config import TransfuserConfig
+from configs import TransfuserConfig, load_config
 from model.model import TransfuserModel
 from dataset.dataset import TruckScenesDataset
 
@@ -31,7 +31,8 @@ from visualize import _render_sample, _get_gt_boxes_with_category
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = TransfuserConfig()
+    config = load_config(args.config)
+    print(f"Loaded config: configs/{args.config}.py")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,11 +61,17 @@ def main(args):
 
     # 모델 로드
     model = None
+    model_label = None
     if args.checkpoint:
         model = TransfuserModel(config=config).to(device)
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"], strict=False)
         model.eval()
+        ckpt_path = Path(args.checkpoint)
+        run_name = ckpt_path.parent.parent.name if ckpt_path.parent.name == "checkpoints" \
+            else ckpt_path.parent.name
+        model_label = (f"{run_name} | epoch={ckpt.get('epoch', '?')} "
+                       f"step={ckpt.get('global_step', '?')}")
         print(f"Loaded: {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
     # 임시 폴더에 frame PNG 저장 → mp4로 합침
@@ -87,7 +94,8 @@ def main(args):
             frame_path = tmpdir / f"frame_{idx:05d}.png"
             _render_sample(idx, features, targets, predictions, config, frame_path,
                            gt_categories=gt_categories,
-                           ts=ts, sample_token=sample_token)
+                           ts=ts, sample_token=sample_token,
+                           model_label=model_label)
             frame_paths.append(frame_path)
             if (idx + 1) % 5 == 0 or idx == len(dataset) - 1:
                 print(f"  frame {idx+1}/{len(dataset)}")
@@ -104,6 +112,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="v4_range",
+                        help="configs/{name}.py (default: v4_range)")
     parser.add_argument("--dataroot", type=str, required=True)
     parser.add_argument("--version", type=str, default="v1.1-trainval")
     parser.add_argument("--split", type=str, default="val")
