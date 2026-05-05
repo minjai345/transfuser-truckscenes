@@ -19,3 +19,4 @@ tools/checks/
 # Claude Code 사용자 설정 (settings.local.json, scheduled_tasks.lock 등)
 .claude/
 tea_debug.log
+CLAUDE.md
