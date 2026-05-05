@@ -255,7 +255,58 @@ paper 진행 + baseline 추가 강화 두 갈래.
 
 ---
 
-## 9. 다음 우선순위
+## 9. status_dropout 정책 검증 (2026-05-05, 조기 중단)
+
+> **상태**: trailer_v5_truck_only_no_status_dropout (status_dropout_p=0) 학습.
+> ep3 시점에서 패턴 명확 → 정량 절약 위해 중단.
+> **결론**: status_dropout=0.5 유지가 정답. 빼면 trivial mapping(`vx·Δt`)으로 회귀.
+
+### 9.1 배경
+
+v2(chassis fake-zero) → v3(clean derived + dropout 0.5) 이행 시 정량 0.5m 악화
+가 dropout 자체 때문인지 input source 변경 때문인지 단정 어려웠음. clean status
++ dropout 0 ablation으로 진짜 원인 분리 시도.
+
+### 9.2 결과 — 부분적 정량 향상 + status 100% 의존
+
+`configs/v5_truck_only_no_status_dropout.py` (= v5_truck_only + status_dropout_p=0):
+
+| ep | truck Avg | straight | curvy | no_lidar | **no_status** |
+|---|---|---|---|---|---|
+| 1 | 0.95 | 0.65 | 3.03 | 1.17 | **32.58** ⚠️ |
+| 2 | **0.88** | 0.66 | 2.65 | 1.05 | **33.00** ⚠️ |
+| 3 | 0.99 | 0.67 | 2.83 | 0.96 | **33.07** ⚠️ |
+
+비교 (v5_truck_only with dropout 0.5, ep20 plateau): truck 1.00 / straight 1.00 /
+curvy 1.58 / no_status ~3-4m.
+
+### 9.3 해석 — paper baseline으로 부적합
+
+- ✓ **부분적 정량 향상**: truck full Avg 0.88 (vs 1.00), straight 0.67 (vs 1.00).
+  사용자 직감 일부 맞음.
+- ⚠️ **no_status ablation 32-33m**: status 입력 빼면 trajectory L2가 33m로 폭발 →
+  **모델이 거의 100% status로 trivial mapping(`vx·Δt`)에 회귀**.
+- ⚠️ **곡선 bin은 오히려 worse** (curvy 2.65-3.03 vs v5_truck_only의 1.58):
+  trivial mapping은 곡선에서 무력. 회전 sample에서 모델이 vision/lidar 못 씀.
+
+→ 직진 dominant 데이터셋(84%)에서 평균 L2가 좋아 보이는 건 trivial solution이
+직진을 잘 평균낸 것일 뿐. **paper baseline으로는 부적합**.
+
+### 9.4 정책 결정
+
+- **status_dropout_p=0.5 유지** (v3 도입 그대로). v3·v4·v5 baseline 모두 이 설정.
+- 사용자 직감 검증 의미는 있었음 — paper에 "naive `vx·Δt` regression이 평균 L2엔
+  좋아 보이지만 status modality 제거 시 catastrophic failure" 정량 증거로 인용 가능.
+- v3·v4·v5의 정량 결과는 status_dropout_p=0.5 기준이라 fair.
+
+### 9.5 종료
+
+ep3 결과로 결론 명확 → ep4-20 학습 미진행 (GPU 22h 절약).
+ckpt: `work_dirs/trailer_v5_truck_only_no_status_dropout_20260505_180905/checkpoints/epoch{1,2,3}.pt`.
+
+---
+
+## 10. 다음 우선순위
 
 §7 권고와 8.4 진단을 종합:
 
@@ -268,7 +319,7 @@ paper 진행 + baseline 추가 강화 두 갈래.
 
 ---
 
-## 10. 측정 재현
+## 11. 측정 재현
 
 ```bash
 # Const-vel baseline
