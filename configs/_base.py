@@ -55,9 +55,12 @@ class TransfuserConfig:
     camera_width: int = 1536
     camera_height: int = 256
     # ResNet ÷32 stem 가정 + fusion transformer pos_emb이 빌드 타임 고정 →
-    # range·해상도가 바뀌어도 lidar_resolution_*가 256² 이면 모델 차원 변경 불요.
-    lidar_resolution_width = 256
-    lidar_resolution_height = 256
+    # range가 바뀌어도 lidar_resolution_*가 256² 이면 모델 차원 변경 불요.
+    # range × pixels_per_meter == lidar_resolution_*가 되도록 v? config에서 override.
+    # (예: x range 80m × 4 px/m → lidar_resolution_height=320)
+    # lidar_vert/horz_anchors도 함께 lidar_resolution_*/32로 맞춰야 GPT pos_emb 정합.
+    lidar_resolution_width: int = 256
+    lidar_resolution_height: int = 256
 
     img_vert_anchors: int = 256 // 32
     img_horz_anchors: int = 1536 // 32

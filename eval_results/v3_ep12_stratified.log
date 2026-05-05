@@ -1,0 +1,72 @@
+Loaded config: configs/v3_baseline.py
+Loading...
+TruckScenesDataset: 2395 valid samples
+  2395 val samples
+Loaded work_dirs/trailer_v3_status_dropout50_20260428_153540/checkpoints/epoch12.pt (epoch 12)
+
+  [200/2395]
+  [400/2395]
+  [600/2395]
+  [800/2395]
+  [1000/2395]
+  [1200/2395]
+  [1400/2395]
+  [1600/2395]
+  [1800/2395]
+  [2000/2395]
+  [2200/2395]
+
+==============================================================================
+Stratified evaluation: const-vel vs trailer_v3 ep12 (val n=2395)
+==============================================================================
+
+Bin distribution:
+   straight [  0-  1°):  1532 samples ( 64.0%)  trailer-mask: 1084
+       lane [  1-  3°):   488 samples ( 20.4%)  trailer-mask: 371
+   moderate [  3- 10°):   240 samples ( 10.0%)  trailer-mask: 229
+      curvy [ 10-  ∞°):   135 samples (  5.6%)  trailer-mask: 135
+
+--- Truck L2 (m) — bin × horizon ---
+       bin       method       1s      2s      3s     avg
+------------------------------------------------------------
+  straight    const_vel    0.086   0.303   0.623   0.338
+  straight      v3_ep12    0.486   1.042   1.632   1.054
+
+      lane    const_vel    0.177   0.655   1.389   0.741
+      lane      v3_ep12    0.412   0.949   1.591   0.984
+
+  moderate    const_vel    0.292   1.128   2.435   1.285
+  moderate      v3_ep12    0.284   0.778   1.426   0.829
+
+     curvy    const_vel    0.618   2.472   5.486   2.859
+     curvy      v3_ep12    0.474   1.477   3.211   1.721
+
+
+--- Trailer L2 (m) — bin × horizon (with-trailer samples) ---
+       bin       method       1s      2s      3s     avg
+------------------------------------------------------------
+  straight    const_vel    0.135   0.357   0.713   0.402
+  straight      v3_ep12    0.779   1.445   2.229   1.484
+
+      lane    const_vel    0.219   0.608   1.275   0.701
+      lane      v3_ep12    0.600   1.064   1.707   1.124
+
+  moderate    const_vel    0.246   0.885   2.034   1.055
+  moderate      v3_ep12    0.527   0.888   1.482   0.966
+
+     curvy    const_vel    0.438   1.602   3.997   2.012
+     curvy      v3_ep12    0.593   1.235   2.598   1.476
+
+==============================================================================
+핵심 비교 (avg L2 across 1/2/3s)
+==============================================================================
+       bin    cv_truck   v3_truck    Δtruck    cv_trail   v3_trail    Δtrail
+------------------------------------------------------------------------------
+  straight       0.338      1.054   +0.716✗       0.402      1.484   +1.083✗
+      lane       0.741      0.984   +0.243✗       0.701      1.124   +0.423✗
+  moderate       1.285      0.829   -0.456✓       1.055      0.966   -0.089✓
+     curvy       2.859      1.721   -1.138✓       2.012      1.476   -0.536✓
+
+범례: ✓ trailer_v3가 const-vel보다 좋음 (음수)
+       ✗ trailer_v3가 더 나쁨 (양수)
+       ≈ 거의 같음 (|diff|<0.05m)

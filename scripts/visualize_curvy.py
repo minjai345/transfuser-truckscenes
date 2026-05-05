@@ -26,6 +26,8 @@ PYTHON = "/home/minjai/miniforge3/envs/truckscenes/bin/python"
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="checkpoint path")
+    p.add_argument("--config", default="v4_range",
+                   help="ckpt 학습에 쓴 config (default: v4_range)")
     p.add_argument("--top", type=int, default=3, help="상위 N개 curvy scene")
     p.add_argument("--out_dir", default="viz/curvy", help="출력 폴더")
     p.add_argument("--fps", type=int, default=2)
@@ -35,7 +37,7 @@ def main():
 
     if not CURVY_JSON.exists():
         print(f"[!] {CURVY_JSON} 없음. 먼저 한 번 돌려:")
-        print(f"    {PYTHON} tools/checks/find_curvy_scenes.py")
+        print(f"    {PYTHON} tools/find_curvy_scenes.py")
         sys.exit(1)
 
     with open(CURVY_JSON) as f:
@@ -63,6 +65,7 @@ def main():
         print(f"[render] idx={r['idx']} {r['name']} → {out_mp4}", flush=True)
         cmd = [
             PYTHON, str(PREDICT_VIDEO),
+            "--config", args.config,
             "--dataroot", args.dataroot,
             "--version", args.version,
             "--split", "val",

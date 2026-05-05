@@ -399,6 +399,116 @@ def run_input_ablation_eval(
     return metrics
 
 
+CURVATURE_BINS = [
+    ("straight", 0.0, 1.0),     # ~64% — 차선 유지
+    ("lane",     1.0, 3.0),     # ~20% — 약한 차선 변경
+    ("moderate", 3.0, 10.0),    # ~10% — 중간 곡선
+    ("curvy",    10.0, 9999.0), # ~6%  — 강한 회전
+]
+
+
+def _bin_for_dh(dh_deg: float) -> str:
+    for name, lo, hi in CURVATURE_BINS:
+        if lo <= dh_deg < hi:
+            return name
+    return "curvy"
+
+
+def run_curvature_stratified_eval(model, dataset, config, device, num_subset=None):
+    """val sample을 |Δheading@3s| bin으로 나눠 bin별 truck/trailer L2 측정.
+
+    매 epoch wandb에 곡선 진행도 트래킹 위함. full val 2,395 sample은 ~10분 추가
+    (단일 추론). num_subset 주면 앞에서부터 그만큼만.
+
+    Returns dict with keys:
+      stratified/{bin_name}/truck_l2_{1,2,3}s
+      stratified/{bin_name}/truck_l2_avg
+      stratified/{bin_name}/trailer_l2_{1,2,3}s   (mask=1 sample만)
+      stratified/{bin_name}/trailer_l2_avg
+      stratified/{bin_name}/n_samples
+      stratified/{bin_name}/n_trailer_samples
+    """
+    horizon_indices = {
+        h: int(h / config.trajectory_sampling_interval) - 1 for h in EVAL_HORIZONS
+    }
+    idx_3s = horizon_indices[3.0]
+
+    truck_l2 = {b[0]: {h: [] for h in EVAL_HORIZONS} for b in CURVATURE_BINS}
+    trailer_l2 = {b[0]: {h: [] for h in EVAL_HORIZONS} for b in CURVATURE_BINS}
+    bin_counts = {b[0]: 0 for b in CURVATURE_BINS}
+    trailer_bin_counts = {b[0]: 0 for b in CURVATURE_BINS}
+
+    n = len(dataset) if num_subset is None else min(num_subset, len(dataset))
+
+    prev_mode = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for i in range(n):
+                features, targets = dataset[i]
+                gt_traj = targets["trajectory"].numpy()
+                _, _, h3 = gt_traj[idx_3s]
+                dh_deg = abs(float(np.degrees(h3)))
+                bin_name = _bin_for_dh(dh_deg)
+                bin_counts[bin_name] += 1
+
+                features_b = {k: v.unsqueeze(0).to(device) for k, v in features.items()}
+                preds = model(features_b)
+                pred_traj = preds["trajectory"][0].cpu().numpy()
+
+                for h in EVAL_HORIZONS:
+                    k = horizon_indices[h]
+                    truck_l2[bin_name][h].append(
+                        float(np.linalg.norm(pred_traj[k, :2] - gt_traj[k, :2]))
+                    )
+
+                trailer_mask = float(targets.get("trailer_mask", torch.tensor(0.0)).item())
+                if (
+                    trailer_mask > 0.5
+                    and "trailer_trajectory" in targets
+                    and "trailer_trajectory" in preds
+                ):
+                    gt_trailer = targets["trailer_trajectory"].numpy()
+                    pred_trailer = preds["trailer_trajectory"][0].cpu().numpy()
+                    trailer_bin_counts[bin_name] += 1
+                    for h in EVAL_HORIZONS:
+                        k = horizon_indices[h]
+                        trailer_l2[bin_name][h].append(
+                            float(np.linalg.norm(pred_trailer[k, :2] - gt_trailer[k, :2]))
+                        )
+    finally:
+        model.train(prev_mode)
+
+    metrics = {}
+    print(f"  [stratified] n={n} samples, bin distribution:")
+    for b_name, lo, hi in CURVATURE_BINS:
+        c = bin_counts[b_name]
+        tc = trailer_bin_counts[b_name]
+        metrics[f"stratified/{b_name}/n_samples"] = float(c)
+        metrics[f"stratified/{b_name}/n_trailer_samples"] = float(tc)
+        truck_means = []
+        trailer_means = []
+        for h in EVAL_HORIZONS:
+            tv = truck_l2[b_name][h]
+            tm = float(np.mean(tv)) if tv else float("nan")
+            metrics[f"stratified/{b_name}/truck_l2_{int(h)}s"] = tm
+            truck_means.append(tm)
+            rv = trailer_l2[b_name][h]
+            rm = float(np.mean(rv)) if rv else float("nan")
+            metrics[f"stratified/{b_name}/trailer_l2_{int(h)}s"] = rm
+            trailer_means.append(rm)
+        truck_avg = float(np.mean([m for m in truck_means if not np.isnan(m)])) \
+            if any(not np.isnan(m) for m in truck_means) else float("nan")
+        trailer_avg = float(np.mean([m for m in trailer_means if not np.isnan(m)])) \
+            if any(not np.isnan(m) for m in trailer_means) else float("nan")
+        metrics[f"stratified/{b_name}/truck_l2_avg"] = truck_avg
+        metrics[f"stratified/{b_name}/trailer_l2_avg"] = trailer_avg
+        print(f"    {b_name:>9} n={c:>4} (trailer={tc:>4})  "
+              f"truck={truck_avg:.3f}m  trailer={trailer_avg:.3f}m")
+
+    return metrics
+
+
 def _print_results(metrics):
     """Pretty-print evaluation metrics."""
     print("\n" + "=" * 60)

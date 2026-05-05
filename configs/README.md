@@ -39,6 +39,9 @@ default는 최신 stable 버전 (현재 `v4_range`).
 | `v3_baseline` | (no override — base 그대로) | NavSim 표준에 trailer head + status_dropout 0.5 추가. trailer_v3 학습에 사용 |
 | `v4_range` | `lidar_min_x=-16, lidar_max_x=48` | TruckScenes highway에서 4s horizon 78m가 BEV 32m을 초과 → 곡선 인지 불가. 전방 48m으로 확장 |
 | `v4_truck_only` | `+ use_trailer_head=False, trailer_weight=0.0` | paper의 strict truck-only baseline. trailer query slot · head 자체 빌드 skip → capacity까지 truck-only. v4_range와 같은 BEV 설정에서 trailer 유무 ablation |
+| `v5_range_full` | `lidar_min_x=-32` (v4 −16에서 회복), `lidar_resolution_height=320`, `lidar_vert_anchors=10` | v4 곡선 후퇴 진단 fix: 후방 16m → 32m으로 회복(트레일러 swing cover) + forward 48m 유지. grid 320×256 → pos_emb shape 변경, from-scratch 학습 |
+| `v5_truck_only` | `+ use_trailer_head=False, trailer_weight=0.0` | v5_range_full의 capacity-matched truck-only ablation. paper의 trailer head contribution 비교군 |
+| `v5_truck_only_no_status_dropout` | `+ status_dropout_p=0.0` (v5_truck_only 기반) | dropout 정책 검증. v5_truck_only(dropout 0.5) vs 본 변형(dropout 0)으로 status_dropout이 정량 L2를 깎고 있는지 1:1 비교 |
 
 ## 주의
 

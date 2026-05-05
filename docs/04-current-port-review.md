@@ -16,7 +16,7 @@
 | `dataset/dataset.py` | 364 | TruckScenesDataset (4-cam stitch + 6-LiDAR merge + targets) |
 | `train.py` | 362 | 학습 루프, optimizer, wandb 로깅, 체크포인트 |
 | `evaluate.py` | 282 | L2 / collision @ 1/2/3s 메트릭 |
-| `tools/overfit_test.py` | — | 1 batch overfit sanity check |
+| `tools/checks/overfit_test.py` | — | 1 batch overfit sanity check (gitignored, 일회성 검증) |
 | `tools/visualize.py` | — | BEV/카메라 visualization |
 | `tools/predict_video.py` | — | scene 단위 예측 비디오 생성 |
 | `tools/data_stats.py` | — | 데이터셋 통계 |

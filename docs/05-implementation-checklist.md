@@ -44,7 +44,7 @@ transfuser-truckscenes/
 - scene·sample 수, vehicle 카테고리 분포, LiDAR 포인트 수 등 출력.
 - 카테고리 분포 출력에서 `vehicle.*` 외에 다른 prefix가 학습 target으로 들어가지 않는지 확인.
 
-### 3.2 1 batch overfit (`tools/overfit_test.py`)
+### 3.2 1 batch overfit (`tools/checks/overfit_test.py`)
 - 단일 batch(작게는 1~4 sample)를 반복 학습시켜 loss가 빠르게 0 근처로 떨어지는지 확인.
 - **기대 동작**: trajectory loss + agent class/box loss 합이 50 epoch 이내로 한 자리 수까지 떨어진다. 최근 커밋 `4da6d12`로 trajectory/class/box loss를 분해해 출력하므로 어느 component가 오버피팅 안 되는지 바로 식별 가능.
 - **함정**:
@@ -212,7 +212,7 @@ export WANDB_MODE=offline   # wandb 로그인 없이 시험할 때
 python tools/data_stats.py --dataroot data/man-truckscenes --version v1.0-mini
 
 # 1 batch overfit
-python tools/overfit_test.py --dataroot data/man-truckscenes --version v1.0-mini
+python tools/checks/overfit_test.py --dataroot data/man-truckscenes --version v1.0-mini
 
 # 학습
 python train.py --dataroot data/man-truckscenes --version v1.0-mini --batch_size 4 --epochs 10

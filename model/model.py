@@ -28,7 +28,11 @@ class TransfuserModel(nn.Module):
         self._config = config
         self._backbone = TransfuserBackbone(config)
 
-        self._keyval_embedding = nn.Embedding(8**2 + 1, config.tf_d_model)
+        # keyval = (lidar BEV tokens after ÷32 stem) + 1 status token.
+        # lidar BEV token 수 = lidar_vert_anchors × lidar_horz_anchors. v3·v4의 8×8=64인데
+        # range 변경 config (e.g. v6_range_full)는 다른 grid라 동적으로 산출.
+        n_keyval = config.lidar_vert_anchors * config.lidar_horz_anchors + 1
+        self._keyval_embedding = nn.Embedding(n_keyval, config.tf_d_model)
         self._query_embedding = nn.Embedding(sum(self._query_splits), config.tf_d_model)
 
         self._bev_downscale = nn.Conv2d(512, config.tf_d_model, kernel_size=1)

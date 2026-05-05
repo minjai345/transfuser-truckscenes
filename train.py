@@ -17,7 +17,7 @@ from configs import TransfuserConfig, load_config
 from model.model import TransfuserModel
 from model.loss import transfuser_loss
 from dataset.dataset import TruckScenesDataset
-from evaluate import run_evaluation, run_input_ablation_eval
+from evaluate import run_evaluation, run_input_ablation_eval, run_curvature_stratified_eval
 
 # wandb는 optional — 설치 안됐거나 --wandb 미지정이면 비활성화 상태로 동작
 try:
@@ -322,6 +322,18 @@ def train(args):
         )
         print(f"Ablation eval done in {time.time() - ablation_start:.1f}s")
 
+        # Stratified eval — bin별(straight/lane/moderate/curvy) truck/trailer L2 트래킹.
+        # full val 2,395 sample 추론 후 |Δheading@3s|로 분류. ~10분 추가/epoch.
+        # 곡선 sample(135개)에서 모델이 학습 진행하면서 회복하는지 wandb 곡선으로 추적.
+        strat_start = time.time()
+        stratified_metrics = run_curvature_stratified_eval(
+            model=model,
+            dataset=val_dataset,
+            config=config,
+            device=device,
+        )
+        print(f"Stratified eval done in {time.time() - strat_start:.1f}s")
+
         if use_wandb:
             wandb.log(
                 {f"val/{k}": v for k, v in val_metrics.items()},
@@ -329,6 +341,8 @@ def train(args):
             )
             # ablation_metrics는 이미 "ablation/..." prefix 키이므로 그대로 logging
             wandb.log(ablation_metrics, step=global_step)
+            # stratified_metrics 도 "stratified/..." prefix 키이므로 그대로 logging
+            wandb.log(stratified_metrics, step=global_step)
 
         # Save checkpoint (work_dir/checkpoints/)
         if (epoch + 1) % args.save_interval == 0:
