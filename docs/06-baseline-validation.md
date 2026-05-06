@@ -319,7 +319,59 @@ ckpt: `work_dirs/trailer_v5_truck_only_no_status_dropout_20260505_180905/checkpo
 
 ---
 
-## 11. 측정 재현
+## 11. agent_box_weight 강화 검증 (2026-05-06, 조기 중단)
+
+> **상태**: trailer_v6_box5 (agent_box_weight 1 → 5) 학습. ep10 시점에서 패턴
+> 명확 → 정량 절약 위해 중단.
+> **결론**: agent_box_weight up은 LiDAR encoder를 detection task에 가두어버려서
+> 의도와 정반대 효과. LiDAR Δ가 오히려 감소. v5_truck_only가 여전히 best baseline.
+
+### 11.1 배경
+
+v3·v4·v5 모든 baseline에서 input ablation의 LiDAR Δ가 +0.5m 정도로 modest.
+LiDAR encoder 학습 신호가 약한 게 원인. agent_head loss weight를 1 → 5로 키워
+LiDAR-side aux supervision을 강화해 LiDAR encoder가 더 학습되도록 유도 시도.
+부수효과로 detection 품질 개선도 기대 (시각화상 detection이 거의 못 잡음).
+
+### 11.2 결과 — 의도와 정반대
+
+`configs/v6_box5.py` (= v5_truck_only + agent_box_weight=5.0):
+
+| ep | truck full | straight | curvy | LiDAR Δ |
+|---|---|---|---|---|
+| 5 | 0.94 | **0.79** | 2.68 | +0.04 |
+| 6 | 1.02 | 0.84 | 2.60 | +0.32 |
+| 7 | 0.94 | 0.87 | 2.66 | +0.08 |
+| 8 | 1.01 | 0.97 | 2.63 | +0.10 |
+| 9 | 0.93 | 0.89 | 2.51 | +0.18 |
+
+비교 (v5_truck_only ep20 plateau): truck 1.00 / straight 1.00 / curvy 1.58 /
+LiDAR Δ +0.54.
+
+### 11.3 해석
+
+- ✓ **직선·차로 향상**: straight 0.79~0.97 (vs v5의 1.00). detection 학습이
+  spatial grounding에 도움된 부수효과 가능성.
+- ⚠️ **곡선 후퇴**: curvy 2.51~2.68 (vs v5의 1.58). agent_box_weight up이
+  trajectory loss 비중을 상대적으로 줄여 곡선 학습이 약해짐.
+- ⚠️ **LiDAR Δ 오히려 감소**: +0.04~+0.32 (평균 ~+0.14, vs v5의 +0.54). 의도와
+  정반대. agent_box_weight up이 LiDAR encoder를 **detection task에 가두어**
+  trajectory에 흐르는 LiDAR 기여도는 오히려 줄어들었다는 해석. detection-specific
+  feature와 planning-friendly feature가 같은 encoder에서 trade-off 관계.
+
+→ "LiDAR aux supervision을 키우면 LiDAR가 trajectory에도 더 도움된다"는 가설
+**기각**. encoder가 task-specific으로 분화되어 detection만 좋아지고 trajectory
+에는 영향 적음. LiDAR encoder를 trajectory에 더 쓰게 하려면 다른 lever 필요
+(camera_dropout, multi-frame status, 또는 BEV semantic supervision 부활).
+
+### 11.4 종료
+
+ep10 시점 plateau 도달, ep11-20 진행 안 함 (~14h GPU 절약).
+ckpt: `work_dirs/trailer_v6_box5_20260506_001548/checkpoints/epoch{1..10}.pt`.
+
+---
+
+## 12. 측정 재현
 
 ```bash
 # Const-vel baseline
