@@ -371,7 +371,100 @@ ckpt: `work_dirs/trailer_v6_box5_20260506_001548/checkpoints/epoch{1..10}.pt`.
 
 ---
 
-## 12. 측정 재현
+## 12. NavSim Standard 대비 각 config 일탈 (paper 충실성 점검)
+
+> 2026-05-08 정리. NavSim TransFuser 코드 (`navsim/agents/transfuser/transfuser_agent.py`,
+> `transfuser_config.py`) 직접 확인 후 각 버전이 어떻게 일탈했는지 명시.
+> paper writing 시 "baseline은 NavSim default + 다음 dataset 차이만 적용"으로 disclose 가능.
+
+### 12.1 NavSim default (paper strict standard)
+
+코드 직접 인용:
+```python
+# transfuser_agent.py
+torch.optim.Adam(model.parameters(), lr=self._lr)   # weight_decay 없음
+TrajectorySampling(time_horizon=4, interval_length=0.5)   # T=8
+# LR scheduler 없음 (constant lr)
+# augmentation 없음
+# status_dropout 없음
+
+# transfuser_config.py
+lidar_min_x/max_x/y = ±32          # ±32m 대칭
+use_ground_plane = False           # 1ch BEV (above split_height만)
+trajectory_weight = 10.0
+agent_class_weight = 10.0
+agent_box_weight = 1.0
+bev_semantic_weight = 10.0         # HD map 사용
+backbone = "resnet34"
+# status: navigation_goal + velocity + acceleration (~8D, driving_command 포함)
+```
+
+### 12.2 데이터셋 차이로 인한 공통 일탈 (모든 v config 공유)
+
+TruckScenes vs NuPlan(NavSim) 차이로 발생, **모든 v config 공통**:
+
+| 항목 | NavSim | 우리 모든 v | 정당화 |
+|---|---|---|---|
+| camera | 3-cam, 1024×256 | 4-cam, 1536×256 | TruckScenes 4-cam config (LF/RF/LB/RB) |
+| LiDAR | 1 cloud | 6 LiDAR ego frame 합성 | TruckScenes 6 LiDAR config |
+| status 차원 | 8D (driving_cmd + vel + acc) | 4D (vel + acc) | TruckScenes에 driving_command raw 없음 |
+| `bev_semantic_weight` | 10.0 | **0.0** | HD map 없음 → supervision 못 만듦 |
+| trailer head | 없음 | `_trailer_trajectory_head` 추가 | articulated truck 적응 (paper main contribution scope) |
+| `status_dropout_p` | 0 (없음) | **0.5** | clean status가 trivial mapping(`vx·Δt`) 회귀 유발 → vision/lidar 학습 강제 (검증: §9) |
+| LR schedule | constant | `CosineAnnealingLR(T_max=epochs)` | 표준 transformer 학습 trick. NavSim 미적용이지만 일반 practice |
+
+→ 위 7개 항목은 **TruckScenes 적응 + 일반 transformer practice**로 정당화. paper에서 "TruckScenes domain adaptation"으로 disclose.
+
+### 12.3 각 v config의 추가 일탈 (NavSim default + 위 공통 일탈 외)
+
+| config | 추가 일탈 (delta from "NavSim default + §12.2 공통") | 동기 |
+|---|---|---|
+| `v3_baseline` | 없음 (공통 일탈만) | NavSim에 가장 가까움. paper strict baseline |
+| `v4_range` | `lidar_min_x=-16, lidar_max_x=48` | TruckScenes highway dominant, 4s × 평균속도 ≈ 78m → forward 32m 부족. 단 후방 -16m 짧음 |
+| `v4_truck_only` | v4_range + `use_trailer_head=False, trailer_weight=0.0` | trailer head ablation (capacity 동일) |
+| `v5_range_full` | `lidar_min_x=-32, lidar_max_x=48, lidar_resolution_height=320, lidar_vert_anchors=10` | v4 곡선 후퇴 fix: 후방 32m 회복 + forward 48m 유지. grid 320×256 |
+| `v5_truck_only` | v5_range_full + `use_trailer_head=False, trailer_weight=0.0` | best baseline 후보. trailer head 제거 |
+| `v5_truck_only_no_status_dropout` | v5_truck_only + `status_dropout_p=0.0` | status_dropout 정책 검증 (§9, 조기 중단 확인) |
+| `v6_box5` | v5_truck_only + `agent_box_weight=5.0` | LiDAR aux 강화 시도 (§11, 효과 없음) |
+| `v6_lr_schedule` | v5_truck_only + `optimizer="adamw", weight_decay=0.01, lr_warmup_epochs=1` | paper TransFuser §4.7의 AdamW + weight_decay 0.01 표준. NavSim은 Adam이라 일탈 |
+| `v7_ground_plane` | v5_truck_only + `use_ground_plane=True` | paper TransFuser §3.2 표준 (2-bin BEV). NavSim default False라 일탈 |
+
+### 12.4 paper writing 시 disclosure 가이드
+
+- **"NavSim TransFuser baseline + TruckScenes-specific adaptations (12.2) + experimental modifications (12.3)"** 형태로 명시
+- §12.2 공통 일탈은 dataset 차이 → reviewer 받아들임
+- §12.3 각 v의 추가 일탈은 ablation experiment로 묶어서 보고
+- main baseline은 §12.3에서 efficiency·정량 가장 좋은 하나 선택 (현재 후보: v5_truck_only)
+- 추가 lever들이 NavSim·paper 표준에서 일탈한 이유 정당화 (§12.2의 7개 + §12.3의 각 v 별 추가)
+
+### 12.5 paper TransFuser (PAMI 2023) 표준과의 추가 차이
+
+NavSim 자체가 paper TransFuser에서 fork되며 변형한 부분 (NavSim 기준이라 우리도 동일하게 일탈):
+
+| 항목 | paper TransFuser | NavSim | 우리 |
+|---|---|---|---|
+| backbone | RegNetY-3.2GF | ResNet34 | ResNet34 |
+| Head | autoregressive GRU + CenterNet | query-based (trajectory + agent + bev_sem) | NavSim 따름 |
+| T | 4 | 8 | 8 |
+| optimizer | AdamW + weight_decay 0.01 | Adam | Adam (v6_lr_schedule만 AdamW) |
+| LR schedule | step decay (×0.1 at ep 30·40) | constant | cosine annealing |
+| epochs | 41 | (코드 미명시) | 20 |
+| augmentation | ±20° rotation | 없음 | 없음 (real-world dataset이라 sensor re-render 불가) |
+| Multi-seed | 3 seed | 3 seed | 1 seed (paper writing 시 추가 학습 필요) |
+
+→ paper TransFuser strict 따르려면 위 차이도 모두 disclose. 단 우리 baseline은 NavSim fork라 NavSim에 가깝게 가는 게 자연스러움.
+
+### 12.6 paper 표준 strict 권장 baseline
+
+paper writing 시 main baseline 후보:
+1. **v3_baseline** — NavSim에 가장 가까움. 단 정량 약함 (curvy 1.72)
+2. **v5_truck_only** — 정량 best (curvy 1.58, truck 1.00, LiDAR Δ +0.54). 단 BEV range 일탈 + trailer head 제거
+
+→ **v5_truck_only를 main baseline + multi-seed (3 seed) 학습 + §12.2/§12.3 명시 disclose** 가 가장 합리적 strict 패턴.
+
+---
+
+## 13. 측정 재현
 
 ```bash
 # Const-vel baseline

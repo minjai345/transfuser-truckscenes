@@ -42,7 +42,8 @@ default는 최신 stable 버전 (현재 `v4_range`).
 | `v5_range_full` | `lidar_min_x=-32` (v4 −16에서 회복), `lidar_resolution_height=320`, `lidar_vert_anchors=10` | v4 곡선 후퇴 진단 fix: 후방 16m → 32m으로 회복(트레일러 swing cover) + forward 48m 유지. grid 320×256 → pos_emb shape 변경, from-scratch 학습 |
 | `v5_truck_only` | `+ use_trailer_head=False, trailer_weight=0.0` | v5_range_full의 capacity-matched truck-only ablation. paper의 trailer head contribution 비교군 |
 | `v5_truck_only_no_status_dropout` | `+ status_dropout_p=0.0` (v5_truck_only 기반) | dropout 정책 검증. v5_truck_only(dropout 0.5) vs 본 변형(dropout 0)으로 status_dropout이 정량 L2를 깎고 있는지 1:1 비교. 결과는 `docs/06 §9` |
-| `v6_box5` | `+ agent_box_weight=5.0` (v5_truck_only 기반, loss weight 카테고리 변경이라 v6) | LiDAR aux supervision 강화. detection 품질 개선 + LiDAR encoder 학습 신호 ↑. paper의 LiDAR contribution 증가 검증 |
+| `v6_box5` | `+ agent_box_weight=5.0` (v5_truck_only 기반, loss weight 카테고리 변경이라 v6) | LiDAR aux supervision 강화. detection 품질 개선 + LiDAR encoder 학습 신호 ↑. paper의 LiDAR contribution 증가 검증. **결과**: 의도와 정반대 (LiDAR Δ 오히려 감소, curvy 후퇴). 조기 중단. `docs/06 §11` |
+| `v6_lr_schedule` | `+ optimizer=adamw, weight_decay=0.01, lr_warmup_epochs=1` (v5_truck_only 기반) | NavSim 표준에 가까운 학습 schedule. 학습 안정화 + regularization으로 baseline 정량 향상 시도 |
 
 ## 주의
 

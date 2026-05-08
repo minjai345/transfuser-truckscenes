@@ -136,6 +136,13 @@ class TransfuserConfig:
     # vision branch를 8배 더 많이 사용 → 의도적으로 50%로 끌어올려 vision 학습 강제.
     status_dropout_p: float = 0.5
 
+    # === Optimizer / LR schedule ===
+    # default는 v3·v4·v5 학습에 쓴 설정 (Adam, no weight_decay, no warmup).
+    # NavSim 표준에 가까이 맞추려면 v6_lr_schedule처럼 AdamW + weight_decay + warmup.
+    optimizer: str = "adam"            # "adam" | "adamw"
+    weight_decay: float = 0.0          # AdamW일 때 의미 있음
+    lr_warmup_epochs: int = 0          # 0이면 warmup 없이 바로 cosine annealing 시작
+
     # === Derived properties ===
     @property
     def bev_semantic_frame(self) -> Tuple[int, int]:

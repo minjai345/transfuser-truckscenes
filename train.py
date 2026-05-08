@@ -184,8 +184,32 @@ def train(args):
 
     # Model
     model = TransfuserModel(config=config).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    # Optimizer — config.optimizer로 Adam(default) / AdamW 선택. weight_decay 함께.
+    if config.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=config.weight_decay
+        )
+    else:
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=args.lr, weight_decay=config.weight_decay
+        )
+
+    # LR schedule — warmup 있으면 LinearLR + CosineAnnealingLR을 SequentialLR로 묶음.
+    # warmup 0이면 기존 그대로 cosine annealing만 (v3·v4·v5 호환).
+    if config.lr_warmup_epochs > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, total_iters=config.lr_warmup_epochs
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs - config.lr_warmup_epochs
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine],
+            milestones=[config.lr_warmup_epochs],
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {num_params:,}")
