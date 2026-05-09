@@ -464,7 +464,100 @@ paper writing 시 main baseline 후보:
 
 ---
 
-## 13. 측정 재현
+## 13. v7 ground_plane 검증 + 최종 baseline 결정 (2026-05-10)
+
+> **상태**: trailer_v7_ground_plane (use_ground_plane=True) 학습 완료. paper
+> TransFuser §3.2 표준 lever 적용. 정량 + LiDAR utilization + paper 충실성
+> 종합 평가.
+> **결론**: v7이 paper baseline 후보 중 **paper 충실성 + LiDAR utilization
+> 가장 좋음**. 정량 truck L2도 best. 단 curvy bin은 v5_truck_only 대비 +0.04m
+> noise floor 안 차이.
+
+### 13.1 학습 결과 (val full 2,395)
+
+`configs/v7_ground_plane.py` (= v5_truck_only + use_ground_plane=True). 20 epoch
+학습. plateau (ep14-20) 정량:
+
+| metric | v7 ep20 | 비교: v5_truck_only ep20 |
+|---|---|---|
+| truck full Avg | **0.94** | 1.00 (-0.06 v7 better) |
+| straight | 0.95 | 1.00 (-0.05 v7 better) |
+| lane | 0.99 | 0.92 (+0.07 v5 better) |
+| moderate | 0.88 | 0.95 (-0.07 v7 better) |
+| curvy | 1.80 | 1.76 (+0.04 v5 better, ≈ noise) |
+| **LiDAR Δ** | **+0.79** | +0.54 (v7 +0.25 better, paper §3.2 표준 효과) |
+
+→ 정량적으로 v5와 거의 동등 (Δ < 0.1m bin별). **차이는 LiDAR utilization
+강화에서 명확** — v7의 LiDAR Δ +0.79가 모든 baseline 중 최대.
+
+### 13.2 const-vel 비교 (paper baseline 자격)
+
+| bin | const-vel truck | v7_ep20 truck | Δ | 자격 |
+|---|---|---|---|---|
+| straight (64%) | 0.34 | 0.95 | +0.61 | const-vel 우세 (trivial mapping) |
+| lane (20.4%) | 0.74 | 0.99 | +0.25 | const-vel 우세 |
+| **moderate (10%)** | 1.29 | **0.88** | **−0.41** | **v7 우세 ✓** |
+| **curvy (5.6%)** | 2.86 | **1.80** | **−1.06** | **v7 우세 ✓** |
+
+→ **moderate·curvy에서 const-vel을 명확히 깸**. paper에서 articulation metric은
+곡선 sample 위주라 **paper baseline 자격 충족** ("non-trivial" baseline
+= 곡선/회전에서 trivial mapping보다 명확히 좋음).
+
+### 13.3 세 baseline 후보 종합 비교
+
+| 기준 | v3_baseline | v5_truck_only | **v7_ground_plane** |
+|---|---|---|---|
+| paper TransFuser §3.2 (`use_ground_plane=True`) | ✗ False | ✗ False | **✓ True** |
+| NavSim default (`use_ground_plane=False`) | ✓ default | ✓ default | ✗ override |
+| trailer head | ✓ 있음 | ✗ 없음 | ✗ 없음 |
+| BEV range (forward / backward) | 32 / 32 | 48 / 32 | 48 / 32 |
+| truck full L2 (val 2,395) | 1.05 | 1.00 | **0.94** |
+| curvy bin truck L2 | **1.72** | 1.76 | 1.80 |
+| LiDAR Δ (no_lidar - full) | +0.45 | +0.54 | **+0.79** |
+| paper 충실성 (PAMI §3.2) | ✗ | ✗ | **✓** |
+| paper 충실성 (NavSim default) | ✓ | △ (range 변경) | △ (ground_plane 변경) |
+
+**Trade-off 정리**:
+- **v3_baseline**: NavSim default에 가장 가까움. 정량 약함 (truck 1.05).
+- **v5_truck_only**: 정량 좋음 + curvy bin 최고. 단 paper TransFuser와 NavSim
+  모두에서 일탈 (BEV range + ground_plane 둘 다 다름).
+- **v7_ground_plane**: paper TransFuser §3.2 표준에 정합 + 정량 truck L2 best
+  + LiDAR utilization 가장 강력. curvy bin은 v5보다 약간 worse but noise floor 안.
+
+### 13.4 paper baseline 권장: v7_ground_plane
+
+**근거**:
+1. **paper TransFuser §3.2의 ground plane 2-bin BEV는 default**. v7만 이걸
+   따름 → paper 표준 충실성 가장 강함
+2. **LiDAR utilization +0.79 (모든 baseline 중 최대)**. paper에서 LiDAR가
+   학습된 모델에 명확히 기여한다고 보고 가능
+3. **truck full L2 0.94 (best)** + moderate·curvy bin에서 const-vel 깸 →
+   paper baseline 자격 충족
+4. curvy bin의 v5와 0.04m 차이는 single-seed noise 영역 (multi-seed로 검증
+   필요. paper writing 시점에 추가)
+
+**§12.2 공통 일탈 (TruckScenes 차이) + §12.3 v7 추가 일탈** 명시:
+- v7 = NavSim default + (1) §12.2 공통 + (2) `use_ground_plane=True`
+  (paper TransFuser §3.2 default로 되돌림) + (3) BEV range -32~48 (TruckScenes
+  highway 적응) + (4) `use_trailer_head=False, trailer_weight=0.0` (capacity-matched)
+
+이 disclosure 패턴으로 paper writing.
+
+### 13.5 추가 측정 권고 (paper writing 시)
+
+- **Multi-seed (3 seed) v7_ground_plane** — paper §4.2/§4.7 표준. mean ± std
+  로 보고. 1-seed 차이가 noise인지 확인.
+- v7 ep20 vs ep14 (curvy best 1.74) ckpt 선택 — paper에 어느 epoch 보고할지
+- v7 vs const-vel + 다른 baseline 정량 표 정리
+
+### 13.6 시각적 관찰
+
+`viz/curvy_v7_ground_plane_ep20/` (top 3 curvy scene mp4, idx 12 / 22 / 46).
+v5 viz (`viz/curvy_v5_ep20/`)와 직접 비교 가능 (동일 scene).
+
+---
+
+## 14. 측정 재현
 
 ```bash
 # Const-vel baseline
