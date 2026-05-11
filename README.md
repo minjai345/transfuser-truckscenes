@@ -57,6 +57,25 @@ data/man-truckscenes/
 
 **Paper baseline = `v7_ground_plane`** (LiDAR 2채널 BEV ground-plane split). 근거는 `docs/06-baseline-validation.md` §13.
 
+## Pretrained Checkpoints
+
+[GitHub Releases](https://github.com/minjai345/transfuser-truckscenes/releases/tag/v7-baseline-ckpts)에서 다운로드. 모두 동일한 `v7_ground_plane` config로 20 epoch 학습 (val full 2,395 samples 평가). 자세한 측정 방법과 비교는 `docs/06-baseline-validation.md` §13.
+
+| Config | Epoch | Truck full L2 ↓ | Curvy bin L2 ↓ | LiDAR Δ ↑ | Note | Download |
+|---|---|---|---|---|---|---|
+| [`v7_ground_plane`](configs/v7_ground_plane.py) | **20** | **0.94 m** | 1.80 m | **+0.79** | Plateau 대표 / paper main result | [v7_ground_plane_ep20.pt](https://github.com/minjai345/transfuser-truckscenes/releases/download/v7-baseline-ckpts/v7_ground_plane_ep20.pt) (642 MB) |
+| [`v7_ground_plane`](configs/v7_ground_plane.py) | 14 | — | **1.74 m** | — | Curvy bin best | [v7_ground_plane_ep14.pt](https://github.com/minjai345/transfuser-truckscenes/releases/download/v7-baseline-ckpts/v7_ground_plane_ep14.pt) (642 MB) |
+
+다운로드 + 평가:
+
+```bash
+# 다운로드
+wget https://github.com/minjai345/transfuser-truckscenes/releases/download/v7-baseline-ckpts/v7_ground_plane_ep20.pt
+
+# 평가
+./scripts/evaluate.py --ckpt v7_ground_plane_ep20.pt --config v7_ground_plane
+```
+
 ## 프로젝트 구조
 
 ```
