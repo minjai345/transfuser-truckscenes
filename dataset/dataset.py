@@ -55,20 +55,37 @@ class TruckScenesDataset(Dataset):
         config: TransfuserConfig,
         num_future_samples: int = 8,
         split_tokens: Optional[List[str]] = None,
+        cache_dir: Optional[str] = None,
     ):
         """
         :param ts: initialized TruckScenes devkit instance
         :param config: TransFuser config
         :param num_future_samples: number of future samples for trajectory target
         :param split_tokens: if provided, only use these scene tokens
+        :param cache_dir: if provided, look up pre-computed (features, targets) pkl.gz
+            files in this directory (produced by `tools/build_cache.py`). On cache miss
+            we fall back to computing the sample from raw files. Used to accelerate
+            training when the same dataset is iterated many times.
         """
         self._ts = ts
         self._config = config
         self._num_future_samples = num_future_samples
+        # None disables the cache and forces raw computation on every __getitem__.
+        from pathlib import Path as _Path
+        self._cache_dir = _Path(cache_dir) if cache_dir else None
 
         # Collect valid sample tokens: samples that have enough future frames
         self._sample_tokens = self._collect_valid_samples(split_tokens)
-        print(f"TruckScenesDataset: {len(self._sample_tokens)} valid samples")
+        n_total = len(self._sample_tokens)
+        n_cached = 0
+        if self._cache_dir is not None and self._cache_dir.exists():
+            for token in self._sample_tokens:
+                if (self._cache_dir / f"{token}.pkl.gz").exists():
+                    n_cached += 1
+        print(f"TruckScenesDataset: {n_total} valid samples"
+              + (f" (cache: {n_cached}/{n_total} = "
+                 f"{n_cached/max(n_total,1)*100:.0f}% hit, dir={self._cache_dir})"
+                 if self._cache_dir is not None else ""))
 
     def _collect_valid_samples(self, split_tokens: Optional[List[str]] = None) -> List[str]:
         """Collect sample tokens that have enough future frames for trajectory."""
@@ -99,6 +116,21 @@ class TruckScenesDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         sample_token = self._sample_tokens[idx]
+
+        # Cache fast path: skip raw image / lidar / pose computation when a pre-built
+        # pkl.gz exists. Format matches what tools/build_cache.py writes:
+        # `pickle.dump((features, targets), f, protocol=HIGHEST_PROTOCOL)`.
+        if self._cache_dir is not None:
+            cache_path = self._cache_dir / f"{sample_token}.pkl.gz"
+            if cache_path.exists():
+                import gzip
+                import pickle
+                with gzip.open(cache_path, "rb") as f:
+                    return pickle.load(f)
+            # Cache miss: fall through to raw computation. We intentionally do not
+            # write the cache here — concurrent dataloader workers + non-atomic writes
+            # would race. Use tools/build_cache.py to populate the cache.
+
         sample = self._ts.get("sample", sample_token)
 
         # === Features ===

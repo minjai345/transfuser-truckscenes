@@ -159,6 +159,7 @@ def train(args):
         config=config,
         num_future_samples=config.num_poses,
         split_tokens=train_scene_tokens,
+        cache_dir=args.cache_dir,
     )
     dataloader = DataLoader(
         train_dataset,
@@ -174,12 +175,13 @@ def train(args):
         prefetch_factor=4 if args.num_workers > 0 else None,
     )
 
-    # Val dataset — run_evaluation이 인덱싱 방식으로 순회하므로 DataLoader 불필요
+    # Val dataset — run_evaluation iterates via indexing so no DataLoader is needed.
     val_dataset = TruckScenesDataset(
         ts=ts,
         config=config,
         num_future_samples=config.num_poses,
         split_tokens=val_scene_tokens,
+        cache_dir=args.cache_dir,
     )
 
     # Model
@@ -456,6 +458,9 @@ if __name__ == "__main__":
                              "default: 최신 stable 버전.")
     parser.add_argument("--dataroot", type=str, required=True, default="./data", help="Path to TruckScenes data")
     parser.add_argument("--version", type=str, default="v1.0-mini", help="TruckScenes version")
+    parser.add_argument("--cache_dir", type=str, default=None,
+                        help="Directory of pre-built sample pkl.gz files (from tools/build_cache.py). "
+                             "None disables cache.")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
