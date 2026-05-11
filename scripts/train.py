@@ -24,8 +24,8 @@ VERSION = "v1.1-trainval"
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--config", default="v4_range",
-                   help="configs/{name}.py stem (default: v4_range).")
+    p.add_argument("--config", default="v7_ground_plane",
+                   help="configs/{name}.py stem (default: v7_ground_plane — paper baseline).")
     p.add_argument("--run_name", default="trailer_v4",
                    help="wandb run name. resume 시 ckpt 경로에서 자동 추정.")
     p.add_argument("--epochs", type=int, default=20)

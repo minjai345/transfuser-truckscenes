@@ -29,8 +29,8 @@ def main():
                    help="output mp4 path (default: viz/scene<idx>.mp4)")
     p.add_argument("--fps", type=int, default=2,
                    help="2가 실시간 (sample 0.5s 간격)")
-    p.add_argument("--config", default="v4_range",
-                   help="configs/{name}.py (default: v4_range)")
+    p.add_argument("--config", default="v7_ground_plane",
+                   help="configs/{name}.py (default: v7_ground_plane)")
     args = p.parse_args()
 
     out = args.out or f"viz/scene{args.scene_idx}.mp4"

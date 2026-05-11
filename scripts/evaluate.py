@@ -21,8 +21,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", required=True, help="checkpoint path")
-    p.add_argument("--config", default="v4_range",
-                   help="configs/{name}.py — ckpt와 일치하는 버전 (default: v4_range)")
+    p.add_argument("--config", default="v7_ground_plane",
+                   help="configs/{name}.py — ckpt와 일치하는 버전 (default: v7_ground_plane)")
     args = p.parse_args()
 
     cmd = [

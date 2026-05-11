@@ -26,8 +26,8 @@ def main():
     p.add_argument("--num", type=int, default=5)
     p.add_argument("--out", default="viz")
     p.add_argument("--split", default="val", choices=["train", "val"])
-    p.add_argument("--config", default="v4_range",
-                   help="configs/{name}.py (default: v4_range)")
+    p.add_argument("--config", default="v7_ground_plane",
+                   help="configs/{name}.py (default: v7_ground_plane)")
     args = p.parse_args()
 
     cmd = [
