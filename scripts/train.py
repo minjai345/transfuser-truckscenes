@@ -34,6 +34,8 @@ def main():
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--resume", default=None,
                    help="checkpoint path (e.g. work_dirs/<run>/checkpoints/epoch5.pt)")
+    p.add_argument("--cache_dir", default=None,
+                   help="Directory of pre-built sample pkl.gz cache (from tools/build_cache.py).")
     args = p.parse_args()
 
     # resume이면 ckpt 경로에서 run_name 자동 추정 (work_dirs/<run>/checkpoints/epoch.pt → run)
@@ -56,6 +58,8 @@ def main():
     ]
     if args.resume:
         cmd += ["--resume", args.resume]
+    if args.cache_dir:
+        cmd += ["--cache_dir", args.cache_dir]
 
     suffix = "_resume" if args.resume else ""
     log_path = Path(f"/tmp/train_{run_name}{suffix}.log")
