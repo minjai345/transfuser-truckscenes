@@ -25,12 +25,12 @@ config = TransfuserConfig(lidar_min_x=-16, lidar_max_x=48)
 학습 / 평가 / 시각화 스크립트의 `--config` flag로 버전 선택:
 
 ```bash
-./scripts/train.py --config v4_range
-python evaluate.py --config v4_range --checkpoint <path>
-python tools/visualize.py --config v4_range ...
+./scripts/train.py --config v7_ground_plane
+python evaluate.py --config v7_ground_plane --checkpoint <path>
+python tools/visualize.py --config v7_ground_plane ...
 ```
 
-default는 최신 stable 버전 (현재 `v4_range`).
+default는 paper baseline 버전 (현재 `v7_ground_plane` — 근거는 `docs/06-baseline-validation.md` §13).
 
 ## 버전 이력
 
