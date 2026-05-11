@@ -1,4 +1,4 @@
-#!/home/minjai/miniforge3/envs/truckscenes/bin/python
+#!/usr/bin/env python
 """학습 시작 또는 resume.
 
 사용:

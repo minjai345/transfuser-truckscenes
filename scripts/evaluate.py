@@ -1,4 +1,4 @@
-#!/home/minjai/miniforge3/envs/truckscenes/bin/python
+#!/usr/bin/env python
 """Checkpoint 평가 (val split L2 + collision rate + trailer L2).
 
 사용:

@@ -1,4 +1,4 @@
-#!/home/minjai/miniforge3/envs/truckscenes/bin/python
+#!/usr/bin/env python
 """val split N개 sample을 PNG로 시각화. checkpoint 주면 prediction까지 오버레이.
 
 사용:

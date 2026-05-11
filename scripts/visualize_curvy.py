@@ -1,4 +1,4 @@
-#!/home/minjai/miniforge3/envs/truckscenes/bin/python
+#!/usr/bin/env python
 """
 data/scene_curvy_split.json (find_curvy_scenes.py로 생성됨)에서
 상위 N개 curvy scene을 골라 predict_video.py로 mp4 생성.

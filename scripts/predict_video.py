@@ -1,4 +1,4 @@
-#!/home/minjai/miniforge3/envs/truckscenes/bin/python
+#!/usr/bin/env python
 """한 scene의 prediction을 frame별 BEV+camera 시각화 후 mp4로 합침.
 
 사용:
