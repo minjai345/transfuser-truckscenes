@@ -453,9 +453,9 @@ def sanity_check(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TransFuser on TruckScenes")
-    parser.add_argument("--config", type=str, default="v4_range",
-                        help="configs/{name}.py 의 stem (e.g. v3_baseline, v4_range). "
-                             "default: 최신 stable 버전.")
+    parser.add_argument("--config", type=str, default="v7_ground_plane",
+                        help="configs/{name}.py stem (e.g. v3_baseline, v7_ground_plane). "
+                             "Default = paper baseline (see docs/06 §13).")
     parser.add_argument("--dataroot", type=str, required=True, default="./data", help="Path to TruckScenes data")
     parser.add_argument("--version", type=str, default="v1.0-mini", help="TruckScenes version")
     parser.add_argument("--cache_dir", type=str, default=None,

@@ -112,8 +112,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="v4_range",
-                        help="configs/{name}.py (default: v4_range)")
+    parser.add_argument("--config", type=str, default="v7_ground_plane",
+                        help="configs/{name}.py stem. Default = paper baseline.")
     parser.add_argument("--dataroot", type=str, required=True)
     parser.add_argument("--version", type=str, default="v1.1-trainval")
     parser.add_argument("--split", type=str, default="val")

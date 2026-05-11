@@ -26,8 +26,8 @@ PYTHON = "/home/minjai/miniforge3/envs/truckscenes/bin/python"
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="checkpoint path")
-    p.add_argument("--config", default="v4_range",
-                   help="ckpt 학습에 쓴 config (default: v4_range)")
+    p.add_argument("--config", default="v7_ground_plane",
+                   help="configs/{name}.py stem matching the ckpt. Default = paper baseline.")
     p.add_argument("--top", type=int, default=3, help="상위 N개 curvy scene")
     p.add_argument("--out_dir", default="viz/curvy", help="출력 폴더")
     p.add_argument("--fps", type=int, default=2)

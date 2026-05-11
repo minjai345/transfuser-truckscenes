@@ -597,9 +597,9 @@ def evaluate(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate TransFuser on TruckScenes")
-    parser.add_argument("--config", type=str, default="v4_range",
-                        help="configs/{name}.py (default: v4_range). "
-                             "ckpt 학습에 쓴 버전과 일치해야 함.")
+    parser.add_argument("--config", type=str, default="v7_ground_plane",
+                        help="configs/{name}.py stem. Default = paper baseline. "
+                             "Must match the config the ckpt was trained with.")
     parser.add_argument("--dataroot", type=str, required=True)
     parser.add_argument("--version", type=str, default="v1.0-mini")
     parser.add_argument("--checkpoint", type=str, required=True)
