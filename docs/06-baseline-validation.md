@@ -308,6 +308,15 @@ ckpt: `work_dirs/trailer_v5_truck_only_no_status_dropout_20260505_180905/checkpo
 
 ## 10. 다음 우선순위
 
+> **상태 (2026-05-10, §13 이후)**: 아래 항목은 모두 §11~§13에서 검증/결정됨.
+> - `use_ground_plane=True` → v7_ground_plane 학습 → **§13에서 paper baseline 권장**
+> - `v4_truck_only` ablation → v5_truck_only (capacity-matched)로 발전 (§13.3)
+> - `agent_box_weight` 강화 → v6_box5 학습, LiDAR Δ 오히려 감소로 기각 (§11)
+> - LR schedule → v6_lr_schedule, 효과 미미 (§13.3)
+> - plateau ckpt 재측정 → ep14-20 plateau 확인 (§13.1)
+>
+> 아래 단락은 의사결정 historical context로 남김.
+
 §7 권고와 8.4 진단을 종합:
 
 - **paper main contribution은 §7.1 그대로** (articulation metric + kinematic head). v3·v4 비교는 baseline 강화 측면에서 의미 있지만 paper main message는 아님.

@@ -51,4 +51,4 @@ default는 paper baseline 버전 (현재 `v7_ground_plane` — 근거는 `docs/0
 
 - `_base.py`를 수정하면 **모든 vN의 default가 함께 바뀐다.** schema 추가/변경 시 vN의 의미 정합성 확인.
 - ckpt는 vN 사양에 묶임. 다른 v로 resume할 때 호환 여부 직접 판단 필요 (입력 shape이나 channel이 바뀌면 첫 conv·pos_emb 재학습 필요).
-- 새 vN을 만들 때 정수 sequence 이름(`v4_range`, `v5_xxx`)으로 짓고, docstring에 직전 버전과의 delta + 근거 docs 링크를 명시.
+- 새 vN을 만들 때 정수 sequence 이름(예: `v7_ground_plane`, `v8_range_back48`)으로 짓고, docstring에 직전 버전과의 delta + 근거 docs 링크를 명시.
