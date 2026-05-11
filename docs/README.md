@@ -26,7 +26,7 @@
 | [`03-truckscenes-adaptation.md`](03-truckscenes-adaptation.md) | TruckScenes에 어떻게 적용했는지 단계별 가이드 (센서 매핑·데이터 파이프라인·target 생성·좌표계) |
 | [`04-current-port-review.md`](04-current-port-review.md) | 현재 코드 검토 결과: NavSim과 정합한 부분 / 의도적 일탈 / 발견된 갭 / 개선 권고 |
 | [`05-implementation-checklist.md`](05-implementation-checklist.md) | 학습·평가·시각화 실행 체크리스트와 정상 학습 곡선 형태 |
-| [`06-baseline-validation.md`](06-baseline-validation.md) | trailer_v3 ep12 vs constant-velocity 비교 — 곡률 분포 분석과 stratified eval로 baseline 자격 검증 |
+| [`06-baseline-validation.md`](06-baseline-validation.md) | v3~v8 baseline 검증 — 곡률 stratified eval, status_dropout / agent_box_weight / LR schedule / ground_plane lever ablation. §13에서 v7_ground_plane을 paper baseline으로 권장 |
 
 ---
 
@@ -40,16 +40,19 @@
 - **NavSim 레포**: <https://github.com/autonomousvision/navsim>
   - 핵심 경로: `navsim/agents/transfuser/transfuser_*.py`
 - **현재 port**: `/home/minjai/projects/transfuser-truckscenes/`
-  - 모델: `model/{backbone,model,loss,config,enums}.py`
+  - 모델: `model/{backbone,model,loss,enums}.py`
   - 데이터: `dataset/dataset.py`
+  - 설정: `configs/_base.py` (schema + default) + `configs/v*.py` (실험 버전별 override)
   - 실행: `train.py`, `evaluate.py`
-  - 도구: `tools/{overfit_test,visualize,predict_video,data_stats}.py`
+  - 도구: `tools/{build_cache,data_stats,visualize,predict_video,find_curvy_scenes,dump_*_scenes}.py`
   - 일회성 검증/디버깅 스크립트: `tools/checks/` (gitignored)
-  - 실행 wrapper (default 인자 채움): `scripts/{train,visualize,predict_video,evaluate}.py`
+  - 실행 wrapper (default 인자 채움): `scripts/{train,evaluate,visualize,visualize_curvy,predict_video}.py`
 
 ---
 
-## 한눈에 보는 요약
+## 한눈에 보는 요약 (v3_baseline 기준 — NavSim 대비 차이)
+
+아래 표는 **v3_baseline의 NavSim 대비 차이**만 정리한다. v4~v8의 lever 진화(BEV range, status_dropout 검증, agent_box_weight, LR schedule, ground_plane)와 최종 paper baseline 권장은 [`configs/README.md` 버전 이력](../configs/README.md) + [`06-baseline-validation.md` §13](06-baseline-validation.md) 참조.
 
 | 차원 | 결론 |
 |---|---|
@@ -61,7 +64,7 @@
 | Trajectory target | NavSim `Scene.get_future_trajectory()` → 현재 **연속 sample의 ego_pose chain + quaternion 변환** |
 | Agent target | NavSim `name == "vehicle"` → 현재 **`vehicle.*` prefix 매칭** (단, `vehicle.ego_trailer` 제외) |
 | BEV semantic | HD map 부재 → 비활성화 (head·target 모두 미사용) |
-| Augmentation | NavSim도 안 쓰지만 공식 CARLA는 사용. 현재 port도 미적용 — 개선 후보 |
+| Augmentation | NavSim도 안 쓰지만 공식 CARLA는 사용. 현재 port도 미적용 — real-world dataset이라 sensor re-render 불가, 적용 부적합 (`06-baseline-validation.md` §12.3) |
 | ImageNet 정규화 | **NavSim/CARLA 모두 미적용** → 일관성 위해 우리도 미적용 (ToTensor만). reference 따라감 |
 | **Trailer head** | NavSim에 없음. 우리가 추가 — articulated truck 위해 **truck/trailer trajectory 따로 출력** (model.py: `_trajectory_head` + `_trailer_trajectory_head`, loss.py: `truck_l1` + `trailer_l1` mask 처리) |
 | **Resume** | ckpt에 `scheduler_state_dict + global_step + wandb_run_id` 저장 → `--resume <ckpt>`로 같은 work_dir + 같은 wandb run 이어가기 |
