@@ -107,6 +107,19 @@ class TransfuserConfig:
     # mask=0이라 자동 제외되므로 batch별 학습 신호는 비례적으로 줄어듦.
     trailer_weight: float = 10.0
 
+    # trailer GT 생성 방식 토글.
+    # False (default, v3~v9 baseline): annotation center를 그대로 GT로 사용.
+    # True: tractor hitch에 anchor한 center로 보정 (devkit viewer 보정식과 동일).
+    #   future tractor ego_pose의 hitch 위치 + trailer_yaw + trailer_length 로부터
+    #   center 재계산 → annotation drift 제거, articulation 일관성 확보.
+    use_hitch_corrected_trailer: bool = False
+
+    # use_hitch_corrected_trailer=True 일 때만 의미 있음.
+    # 5th wheel / hitch 위치. TruckScenes ego_pose origin을 tractor rear axle로 보고,
+    # MAN TGX viewer 보정식과 동일하게 rear axle 앞 0.3m를 hitch로 사용.
+    trailer_hitch_x: float = 0.3
+    trailer_hitch_y: float = 0.0
+
     # trailer trajectory head 자체를 모델에서 빼는 토글.
     # True (default): query slot + head 빌드, forward에서 trailer trajectory 예측·출력
     # False: query 수가 줄고 trailer head 빌드 안 함 → forward / loss / eval 모두 skip

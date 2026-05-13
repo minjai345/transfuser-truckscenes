@@ -46,6 +46,29 @@ def _is_vehicle_category(name: str) -> bool:
     return name.startswith("vehicle.") and name != "vehicle.ego_trailer"
 
 
+def _hitch_corrected_trailer_center(
+    hitch_x: float,
+    hitch_y: float,
+    trailer_length: float,
+    trailer_yaw: float,
+    hitch_origin_x: float,
+    hitch_origin_y: float,
+    hitch_origin_yaw: float,
+) -> Tuple[float, float]:
+    """Return trailer center anchored to the tractor hitch point.
+
+    The hitch offset is expressed in the tractor ego frame at the target frame.
+    The returned center is in the same global frame as the hitch origin.
+    """
+    cos_h, sin_h = np.cos(hitch_origin_yaw), np.sin(hitch_origin_yaw)
+    hitch_global_x = hitch_origin_x + hitch_x * cos_h - hitch_y * sin_h
+    hitch_global_y = hitch_origin_y + hitch_x * sin_h + hitch_y * cos_h
+
+    center_x = hitch_global_x - (trailer_length / 2.0) * np.cos(trailer_yaw)
+    center_y = hitch_global_y - (trailer_length / 2.0) * np.sin(trailer_yaw)
+    return float(center_x), float(center_y)
+
+
 class TruckScenesDataset(Dataset):
     """PyTorch Dataset for TruckScenes with TransFuser features/targets."""
 
@@ -553,13 +576,35 @@ class TruckScenesDataset(Dataset):
                 next_token = next_sample.get("next", "")
                 continue
 
+            trailer_yaw = _quaternion_to_yaw(trailer_box.orientation)
+
+            if self._config.use_hitch_corrected_trailer:
+                # devkit viewer와 동일하게 trailer annotation center 대신
+                # future tractor hitch에 anchor한 trailer center를 GT로 사용.
+                future_ego = self._ts.get("ego_pose", next_sd["ego_pose_token"])
+                future_pos = np.array(future_ego["translation"][:2])
+                future_yaw = _quaternion_to_yaw(Quaternion(future_ego["rotation"]))
+                trailer_length = trailer_box.wlh[1]  # wlh = [width, length, height]
+                corrected_x, corrected_y = _hitch_corrected_trailer_center(
+                    hitch_x=self._config.trailer_hitch_x,
+                    hitch_y=self._config.trailer_hitch_y,
+                    trailer_length=trailer_length,
+                    trailer_yaw=trailer_yaw,
+                    hitch_origin_x=future_pos[0],
+                    hitch_origin_y=future_pos[1],
+                    hitch_origin_yaw=future_yaw,
+                )
+                trailer_center_global = np.array([corrected_x, corrected_y])
+            else:
+                # baseline: annotation center 그대로 사용 (v3~v9 동작 유지).
+                trailer_center_global = trailer_box.center[:2]
+
             # 글로벌 → 현재 트랙터 ego frame
-            delta = trailer_box.center[:2] - current_pos
+            delta = trailer_center_global - current_pos
             cos_y, sin_y = np.cos(-current_yaw), np.sin(-current_yaw)
             local_x = delta[0] * cos_y - delta[1] * sin_y
             local_y = delta[0] * sin_y + delta[1] * cos_y
 
-            trailer_yaw = _quaternion_to_yaw(trailer_box.orientation)
             local_heading = (trailer_yaw - current_yaw + np.pi) % (2 * np.pi) - np.pi
 
             trajectory[i] = [local_x, local_y, local_heading]
