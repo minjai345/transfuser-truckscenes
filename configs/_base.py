@@ -136,6 +136,34 @@ class TransfuserConfig:
     # vision branch를 8배 더 많이 사용 → 의도적으로 50%로 끌어올려 vision 학습 강제.
     status_dropout_p: float = 0.5
 
+    # NavSim TransFuser baseline parity: concat the 3-way one-hot driving_command
+    # ([Turn Right, Turn Left, Go Straight]) into the status encoder input.
+    # Default False so existing v3~v8 configs / checkpoints stay unaffected.
+    use_driving_command: bool = False
+
+    # VAD §4.2 protocol: drop ego status (vx, vy, ax, ay) from model input to
+    # avoid shortcut learning in open-loop planning evaluation
+    # ("VAD omits ego status features to avoid shortcut learning ... but the
+    #  results of VAD using ego status features are still preserved in Tab. 1
+    #  for reference"). Default True for v3~v7 compatibility — set False in
+    #  configs that want VAD-style omission. When False the status encoder
+    #  drops the (vx, vy, ax, ay) channels and status_dropout has no effect.
+    use_ego_status: bool = True
+
+    # How driving_command is derived from the future ego trajectory.
+    # "heading": threshold |Δyaw@4s| (rad cast from
+    #            `driving_command_threshold_heading_deg`) — closer to
+    #            NavSim/nuPlan's route-derived intent (intersection turns
+    #            only; lane changes stay STRAIGHT).
+    # "lateral": threshold |local_y of last future pose| in meters
+    #            (`driving_command_threshold_lateral_m`) — VAD's original
+    #            nuScenes-converter pattern; conflates lane change with
+    #            real turns. Kept for ablation.
+    # Only consulted when use_driving_command=True.
+    driving_command_mode: str = "heading"
+    driving_command_threshold_heading_deg: float = 15.0
+    driving_command_threshold_lateral_m: float = 2.0
+
     # === Optimizer / LR schedule ===
     # default는 v3·v4·v5 학습에 쓴 설정 (Adam, no weight_decay, no warmup).
     # NavSim 표준에 가까이 맞추려면 v6_lr_schedule처럼 AdamW + weight_decay + warmup.

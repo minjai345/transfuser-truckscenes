@@ -36,7 +36,18 @@ class TransfuserModel(nn.Module):
         self._query_embedding = nn.Embedding(sum(self._query_splits), config.tf_d_model)
 
         self._bev_downscale = nn.Conv2d(512, config.tf_d_model, kernel_size=1)
-        self._status_encoding = nn.Linear(4, config.tf_d_model)
+        # Status encoder input is concatenated from optional channels:
+        #   - ego status (vx, vy, ax, ay) = 4 dims  — toggle: use_ego_status
+        #   - driving_command one-hot      = 3 dims  — toggle: use_driving_command
+        # VAD §4.2 setup drops ego status to avoid shortcut learning. At least
+        # one of the two must be on so the status token has content.
+        status_dim = (4 if config.use_ego_status else 0) \
+                   + (3 if config.use_driving_command else 0)
+        assert status_dim > 0, (
+            "Either use_ego_status or use_driving_command must be True; "
+            "otherwise the status token has no content."
+        )
+        self._status_encoding = nn.Linear(status_dim, config.tf_d_model)
 
         self._bev_semantic_head = nn.Sequential(
             nn.Conv2d(
@@ -103,20 +114,34 @@ class TransfuserModel(nn.Module):
             lidar_feature = None
         else:
             lidar_feature: torch.Tensor = features["lidar_feature"]
-        status_feature: torch.Tensor = features["status_feature"]
+        # Build the status encoder input from optional channels. The status_dropout
+        # below only masks the ego-status channels — the driving_command is a
+        # navigation signal (not a leakage target) and must always pass through.
+        ego_status: torch.Tensor = features["status_feature"]  # (B, 4)
+        batch_size = ego_status.shape[0]
 
-        batch_size = status_feature.shape[0]
-
-        # Status dropout — 학습 시에만, sample-level로 status_feature 일부를 0으로 마스킹.
+        # Status dropout — 학습 시에만, sample-level로 ego status 일부를 0으로 마스킹.
         # 목적: status(vx,vy,ax,ay) → trajectory의 trivial mapping(vx·Δt)에만 의존하지 않고
         #       image/lidar branch가 의미 있게 학습되도록 강제.
         # 마스킹된 0은 학습에 자주 등장하므로 in-distribution이라 inference 영향 없음.
-        if self.training and self._config.status_dropout_p > 0.0:
+        # use_ego_status=False면 ego status를 아예 사용하지 않으므로 dropout 의미 없음.
+        if (
+            self._config.use_ego_status
+            and self.training
+            and self._config.status_dropout_p > 0.0
+        ):
             keep_mask = (
-                torch.rand(batch_size, 1, device=status_feature.device)
+                torch.rand(batch_size, 1, device=ego_status.device)
                 > self._config.status_dropout_p
-            ).to(status_feature.dtype)
-            status_feature = status_feature * keep_mask
+            ).to(ego_status.dtype)
+            ego_status = ego_status * keep_mask
+
+        parts = []
+        if self._config.use_ego_status:
+            parts.append(ego_status)
+        if self._config.use_driving_command:
+            parts.append(features["driving_command"])
+        status_feature = torch.cat(parts, dim=-1)
 
         bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
 
