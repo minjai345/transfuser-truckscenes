@@ -126,7 +126,15 @@ class TruckScenesDataset(Dataset):
                 import gzip
                 import pickle
                 with gzip.open(cache_path, "rb") as f:
-                    return pickle.load(f)
+                    features, targets = pickle.load(f)
+                # Backward-compat: caches built before driving_command was added
+                # don't have the key. Derive it on the fly from the cached
+                # trajectory so we don't force a full cache rebuild.
+                if "driving_command" not in features:
+                    features["driving_command"] = self._get_driving_command(
+                        targets["trajectory"]
+                    )
+                return features, targets
             # Cache miss: fall through to raw computation. We intentionally do not
             # write the cache here — concurrent dataloader workers + non-atomic writes
             # would race. Use tools/build_cache.py to populate the cache.
@@ -138,16 +146,24 @@ class TruckScenesDataset(Dataset):
         lidar_feature = self._get_lidar_feature(sample)
         status_feature = self._get_status_feature(sample)
 
+        # === Targets ===
+        # Compute trajectory first — driving_command derives from its last future pose.
+        trajectory = self._get_trajectory_target(sample)
+        agent_states, agent_labels = self._get_agent_targets(sample)
+        trailer_trajectory, trailer_mask = self._get_trailer_trajectory_target(sample)
+
+        # driving_command is a feature (navigation signal fed into the model),
+        # but it is derived from the future trajectory so we compute it here.
+        driving_command = self._get_driving_command(trajectory)
+
         features = {
             "camera_feature": camera_feature,
             "lidar_feature": lidar_feature,
             "status_feature": status_feature,
+            # 3-way one-hot navigation signal [Turn Left, Turn Right, Straight].
+            # See _get_driving_command for the threshold / axis convention.
+            "driving_command": driving_command,
         }
-
-        # === Targets ===
-        trajectory = self._get_trajectory_target(sample)
-        agent_states, agent_labels = self._get_agent_targets(sample)
-        trailer_trajectory, trailer_mask = self._get_trailer_trajectory_target(sample)
 
         targets = {
             "trajectory": trajectory,
@@ -322,6 +338,63 @@ class TruckScenesDataset(Dataset):
         vx = v_global[0] * cos_y - v_global[1] * sin_y
         vy = v_global[0] * sin_y + v_global[1] * cos_y
         return float(vx), float(vy)
+
+    def _get_driving_command(self, trajectory: torch.Tensor) -> torch.Tensor:
+        """Compute 3-way one-hot driving command from the final future ego pose.
+
+        Spirit follows NavSim/nuPlan's driving_command: a navigation intent
+        signal. NavSim's command is route-plan derived; TruckScenes has no HD
+        map / route plan, so we derive it from the trajectory (same as VAD's
+        nuScenes converter). Two derivation modes are supported and selected
+        by `config.driving_command_mode`:
+
+          "heading" (default):
+            Signal = `trajectory[-1, 2]` (local_heading, radians).
+            Threshold = `driving_command_threshold_heading_deg` (default 15°).
+            Closer to NavSim/nuPlan's route-derived intent (intersection
+            turns only; lane changes stay STRAIGHT). See
+            tools/checks/check_driving_command_heading_sweep.py for the
+            two-mode separation in (lateral, Δheading) space and
+            check_driving_command_heading_boundary_viz.py for boundary
+            cases like (lat 4.3m, Δyaw 6° → lane drift, STRAIGHT) vs
+            (lat 2.9m, Δyaw 29° → real turn, RIGHT) that motivate using
+            heading over lateral.
+
+          "lateral":
+            Signal = `trajectory[-1, 1]` (local_y, meters).
+            Threshold = `driving_command_threshold_lateral_m` (default 2m).
+            VAD's original nuScenes pattern
+            (https://github.com/hustvl/VAD/blob/main/tools/data_converter/vad_nuscenes_converter.py).
+            Kept for ablation — conflates lane change with real turn.
+
+        Frame convention (both modes):
+          Right-handed ego frame (x-forward, y-left, z-up). Positive signal
+          (+Δyaw or +local_y) corresponds to a left action. The one-hot
+          ordering [Turn Right, Turn Left, Go Straight] is kept from VAD so
+          downstream NavSim-parity code stays unchanged.
+        """
+        mode = self._config.driving_command_mode
+        if mode == "heading":
+            signal = float(trajectory[-1, 2])   # local_heading at t=+4s, radians
+            threshold = float(np.deg2rad(
+                self._config.driving_command_threshold_heading_deg
+            ))
+        elif mode == "lateral":
+            signal = float(trajectory[-1, 1])   # local_y, meters
+            threshold = float(self._config.driving_command_threshold_lateral_m)
+        else:
+            raise ValueError(
+                f"Unknown driving_command_mode: {mode!r}. "
+                "Expected 'heading' or 'lateral'."
+            )
+
+        if signal >= threshold:
+            cmd = [0.0, 1.0, 0.0]   # Turn Left  (+ signal)
+        elif signal <= -threshold:
+            cmd = [1.0, 0.0, 0.0]   # Turn Right (- signal)
+        else:
+            cmd = [0.0, 0.0, 1.0]   # Go Straight
+        return torch.tensor(cmd, dtype=torch.float32)
 
     def _get_trajectory_target(self, sample: dict) -> torch.Tensor:
         """Compute future trajectory in ego-centric coordinates."""

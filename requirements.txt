@@ -15,6 +15,9 @@ shapely>=2.0
 # Visualization / IO
 matplotlib>=3.5
 imageio>=2.30
+# ffmpeg plugin — tools/predict_video.py가 mp4로 인코딩하는 데 필요.
+# 별도 시스템 ffmpeg 없이 동작.
+imageio-ffmpeg>=0.4
 
 # Experiment tracking
 wandb>=0.15
