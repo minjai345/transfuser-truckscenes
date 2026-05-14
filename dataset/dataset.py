@@ -17,6 +17,7 @@ from pyquaternion import Quaternion
 from truckscenes.utils.data_classes import LidarPointCloud
 
 from configs._base import TransfuserConfig
+from dataset.builders import Builder, make_default_builders
 from model.enums import BoundingBox2DIndex
 
 
@@ -97,18 +98,38 @@ class TruckScenesDataset(Dataset):
         from pathlib import Path as _Path
         self._cache_dir = _Path(cache_dir) if cache_dir else None
 
+        # Builder-level cache: each builder owns a slice of (features, targets)
+        # and a unique_name that encodes the config fields it depends on.
+        # Layout: <cache_dir>/<sample_token>/<builder_name>.pkl.gz.
+        # See dataset/builders.py for the rationale (NavSim-style).
+        self._builders: List[Builder] = make_default_builders(
+            config, num_future_samples
+        )
+
         # Collect valid sample tokens: samples that have enough future frames
         self._sample_tokens = self._collect_valid_samples(split_tokens)
         n_total = len(self._sample_tokens)
         n_cached = 0
         if self._cache_dir is not None and self._cache_dir.exists():
             for token in self._sample_tokens:
-                if (self._cache_dir / f"{token}.pkl.gz").exists():
+                if self._all_builder_files_exist(token):
                     n_cached += 1
         print(f"TruckScenesDataset: {n_total} valid samples"
               + (f" (cache: {n_cached}/{n_total} = "
                  f"{n_cached/max(n_total,1)*100:.0f}% hit, dir={self._cache_dir})"
                  if self._cache_dir is not None else ""))
+
+    def _all_builder_files_exist(self, sample_token: str) -> bool:
+        """All builder cache files present → sample is cache-hittable."""
+        if self._cache_dir is None:
+            return False
+        sample_dir = self._cache_dir / sample_token
+        if not sample_dir.is_dir():
+            return False
+        return all(
+            (sample_dir / f"{b.get_unique_name()}.pkl.gz").exists()
+            for b in self._builders
+        )
 
     def _collect_valid_samples(self, split_tokens: Optional[List[str]] = None) -> List[str]:
         """Collect sample tokens that have enough future frames for trajectory."""
@@ -140,70 +161,38 @@ class TruckScenesDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         sample_token = self._sample_tokens[idx]
 
-        # Cache fast path: skip raw image / lidar / pose computation when a pre-built
-        # pkl.gz exists. Format matches what tools/build_cache.py writes:
-        # `pickle.dump((features, targets), f, protocol=HIGHEST_PROTOCOL)`.
-        if self._cache_dir is not None:
-            cache_path = self._cache_dir / f"{sample_token}.pkl.gz"
-            if cache_path.exists():
-                import gzip
-                import pickle
-                with gzip.open(cache_path, "rb") as f:
-                    features, targets = pickle.load(f)
-                # Always re-derive driving_command from the cached trajectory
-                # using the *current* config. The cache is built once with
-                # TransfuserConfig() defaults, so the stored driving_command
-                # only reflects the default driving_command_mode/threshold.
-                # Re-deriving at __getitem__ keeps the cache mode-agnostic:
-                # ablations like v9_cmd_no_status (heading 15°) and
-                # v9_cmd_lateral_2m (lateral 2m) share the same cache while
-                # producing different command labels. Also covers caches built
-                # before the key was introduced. Cost is one tensor lookup +
-                # threshold comparison per sample (~µs), negligible vs I/O.
-                features["driving_command"] = self._get_driving_command(
-                    targets["trajectory"]
-                )
-                return features, targets
-            # Cache miss: fall through to raw computation. We intentionally do not
-            # write the cache here — concurrent dataloader workers + non-atomic writes
-            # would race. Use tools/build_cache.py to populate the cache.
+        # Builder-level cache fast path: skip raw image / lidar / pose computation
+        # when every builder for the current config has a per-token cache file.
+        # Layout written by tools/build_cache.py:
+        #   <cache_dir>/<sample_token>/<builder_name>.pkl.gz   (one per builder)
+        # All builder files must exist; otherwise we fall through to raw
+        # computation so a partially-built cache doesn't yield malformed batches.
+        if self._cache_dir is not None and self._all_builder_files_exist(sample_token):
+            import gzip
+            import pickle
+            sample_dir = self._cache_dir / sample_token
+            features: Dict[str, torch.Tensor] = {}
+            targets: Dict[str, torch.Tensor] = {}
+            for builder in self._builders:
+                with gzip.open(sample_dir / f"{builder.get_unique_name()}.pkl.gz", "rb") as f:
+                    output = pickle.load(f)
+                (targets if builder.BUILDER_KIND == "target" else features).update(output)
+            # driving_command is intentionally not cached — derive every time
+            # from the (cached) trajectory so the same cache works for both
+            # heading-based and lateral-based ablations.
+            features["driving_command"] = self._get_driving_command(targets["trajectory"])
+            return features, targets
 
+        # Cache miss (or no cache configured): run every builder fresh.
+        # Same compute path as build_cache.py uses, just no on-disk write —
+        # concurrent dataloader workers + non-atomic writes would race.
         sample = self._ts.get("sample", sample_token)
-
-        # === Features ===
-        camera_feature = self._get_camera_feature(sample)
-        lidar_feature = self._get_lidar_feature(sample)
-        status_feature = self._get_status_feature(sample)
-
-        # === Targets ===
-        # Compute trajectory first — driving_command derives from its last future pose.
-        trajectory = self._get_trajectory_target(sample)
-        agent_states, agent_labels = self._get_agent_targets(sample)
-        trailer_trajectory, trailer_mask = self._get_trailer_trajectory_target(sample)
-
-        # driving_command is a feature (navigation signal fed into the model),
-        # but it is derived from the future trajectory so we compute it here.
-        driving_command = self._get_driving_command(trajectory)
-
-        features = {
-            "camera_feature": camera_feature,
-            "lidar_feature": lidar_feature,
-            "status_feature": status_feature,
-            # 3-way one-hot navigation signal [Turn Left, Turn Right, Straight].
-            # See _get_driving_command for the threshold / axis convention.
-            "driving_command": driving_command,
-        }
-
-        targets = {
-            "trajectory": trajectory,
-            "agent_states": agent_states,
-            "agent_labels": agent_labels,
-            # ego_trailer 미래 trajectory (트랙터 ego frame).
-            # trailer 없는 sample은 zeros + mask=0이라 loss에서 자동 제외됨.
-            "trailer_trajectory": trailer_trajectory,
-            "trailer_mask": trailer_mask,
-        }
-
+        features = {}
+        targets = {}
+        for builder in self._builders:
+            output = builder.compute(self, sample)
+            (targets if builder.BUILDER_KIND == "target" else features).update(output)
+        features["driving_command"] = self._get_driving_command(targets["trajectory"])
         return features, targets
 
     def _get_camera_feature(self, sample: dict) -> torch.Tensor:
