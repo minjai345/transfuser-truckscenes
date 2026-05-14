@@ -21,6 +21,9 @@ Purpose:
 Diffs vs v9_cmd_no_status:
   - driving_command_mode="lateral"  (was "heading")
   - threshold value follows VAD (2.0 m)
+  (Optimizer / scheduler / warmup match v9_cmd_no_status — same training
+   protocol so the only variable between the two runs is the command
+   derivation.)
 """
 from configs._base import TransfuserConfig
 
@@ -38,4 +41,8 @@ config = TransfuserConfig(
     # VAD-style lateral threshold (ablation against v9_cmd_no_status's heading 15°).
     driving_command_mode="lateral",
     driving_command_threshold_lateral_m=2.0,
+    # Match v9_cmd_no_status training protocol (VAD §4.1).
+    optimizer="adamw",
+    weight_decay=0.01,
+    lr_warmup_epochs=2,
 )
