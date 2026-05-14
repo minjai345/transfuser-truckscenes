@@ -150,13 +150,19 @@ class TruckScenesDataset(Dataset):
                 import pickle
                 with gzip.open(cache_path, "rb") as f:
                     features, targets = pickle.load(f)
-                # Backward-compat: caches built before driving_command was added
-                # don't have the key. Derive it on the fly from the cached
-                # trajectory so we don't force a full cache rebuild.
-                if "driving_command" not in features:
-                    features["driving_command"] = self._get_driving_command(
-                        targets["trajectory"]
-                    )
+                # Always re-derive driving_command from the cached trajectory
+                # using the *current* config. The cache is built once with
+                # TransfuserConfig() defaults, so the stored driving_command
+                # only reflects the default driving_command_mode/threshold.
+                # Re-deriving at __getitem__ keeps the cache mode-agnostic:
+                # ablations like v9_cmd_no_status (heading 15°) and
+                # v9_cmd_lateral_2m (lateral 2m) share the same cache while
+                # producing different command labels. Also covers caches built
+                # before the key was introduced. Cost is one tensor lookup +
+                # threshold comparison per sample (~µs), negligible vs I/O.
+                features["driving_command"] = self._get_driving_command(
+                    targets["trajectory"]
+                )
                 return features, targets
             # Cache miss: fall through to raw computation. We intentionally do not
             # write the cache here — concurrent dataloader workers + non-atomic writes
