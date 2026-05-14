@@ -26,7 +26,7 @@ OUT_PATH = _HERE.parent.parent / "data" / "scene_curvy_split.json"
 
 def main():
     print("Loading...", flush=True)
-    ts = TruckScenes(version="v1.1-trainval", dataroot="data/man-truckscenes",
+    ts = TruckScenes(version="v1.2-trainval", dataroot="data/man-truckscenes",
                      verbose=False)
     splits = create_splits_scenes()
     val_names = set(splits["val"])

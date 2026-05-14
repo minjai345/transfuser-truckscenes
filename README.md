@@ -26,13 +26,13 @@ pip install -r requirements.txt
 
 ## 데이터셋
 
-TruckScenes v1.1-trainval을 다음 경로에 배치:
+TruckScenes v1.2-trainval을 다음 경로에 배치:
 
 ```
 data/man-truckscenes/
 ├── samples/
 ├── sweeps/
-└── v1.1-trainval/
+└── v1.2-trainval/
     ├── attribute.json
     └── ...
 ```

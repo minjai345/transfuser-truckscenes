@@ -13,8 +13,8 @@ TruckScenesDataset.__getitem__ 결과를 pickle.gz로 캐시.
 
 사용:
     nice -n 10 python tools/build_cache.py \
-        --dataroot data/man-truckscenes --version v1.1-trainval \
-        --cache_dir data/cache/v1.1-trainval --num_workers 4
+        --dataroot data/man-truckscenes --version v1.2-trainval \
+        --cache_dir data/cache/v1.2-trainval --num_workers 4
 """
 
 import argparse
@@ -74,8 +74,8 @@ def _collate_passthrough(batch):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataroot", type=str, default="data/man-truckscenes")
-    parser.add_argument("--version", type=str, default="v1.1-trainval")
-    parser.add_argument("--cache_dir", type=str, default="data/cache/v1.1-trainval")
+    parser.add_argument("--version", type=str, default="v1.2-trainval")
+    parser.add_argument("--cache_dir", type=str, default="data/cache/v1.2-trainval")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="학습과 동시 실행 시 4 권장 (12 코어 중 4 사용)")
     parser.add_argument("--split", type=str, default="all",

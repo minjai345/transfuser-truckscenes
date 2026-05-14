@@ -3,7 +3,7 @@ Dataset stats — 학습 데이터가 이상한 값(전부 0, NaN 등)이 들어
 Val split 전체를 순회하면서 target/feature 분포를 요약.
 
 사용법:
-    python tools/data_stats.py --dataroot <path> --version v1.1-trainval --split val --max_samples 500
+    python tools/data_stats.py --dataroot <path> --version v1.2-trainval --split val --max_samples 500
 """
 
 import argparse
@@ -188,7 +188,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataroot", type=str, required=True)
-    parser.add_argument("--version", type=str, default="v1.1-trainval")
+    parser.add_argument("--version", type=str, default="v1.2-trainval")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test", "mini_train", "mini_val"])
     parser.add_argument("--max_samples", type=int, default=500, help="최대 확인 샘플 수 (균등 간격 서브샘플)")
     args = parser.parse_args()

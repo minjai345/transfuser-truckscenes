@@ -3,14 +3,14 @@ Scene을 ego_trailer 유무로 분리해서 json으로 저장.
 
 출력 구조:
 {
-  "version": "v1.1-trainval",
+  "version": "v1.2-trainval",
   "total_scenes": 598,
   "with_ego_trailer":    {"count": N, "scenes": [{"name": ..., "token": ...}, ...]},
   "without_ego_trailer": {"count": M, "scenes": [...]}
 }
 
 사용:
-  python tools/dump_trailer_scenes.py --version v1.1-trainval \
+  python tools/dump_trailer_scenes.py --version v1.2-trainval \
       --output data/scene_trailer_split.json
 """
 
@@ -27,7 +27,7 @@ sys.path.insert(0, str(_HERE.parent))
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataroot", type=str, default="data/man-truckscenes")
-    parser.add_argument("--version", type=str, default="v1.1-trainval")
+    parser.add_argument("--version", type=str, default="v1.2-trainval")
     parser.add_argument("--output", type=str, default="data/scene_trailer_split.json")
     args = parser.parse_args()
 

@@ -49,7 +49,7 @@ Optimizer (VAD §4.1 verbatim):
 Recommended training command (batch 16 on a single B200):
   ./scripts/train.py --config v9_cmd_no_status \\
       --epochs 48 --batch_size 16 --num_workers 16 --lr 2e-4 \\
-      --cache_dir data/cache/v1.1-trainval
+      --cache_dir data/cache/v1.2-trainval
 
 Diffs vs v7_ground_plane:
   - use_driving_command=True   (was False)

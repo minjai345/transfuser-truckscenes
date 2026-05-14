@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 
 DATAROOT = "data/man-truckscenes"
-VERSION = "v1.1-trainval"
+VERSION = "v1.2-trainval"
 
 
 def main():

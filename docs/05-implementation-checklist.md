@@ -29,7 +29,7 @@ transfuser-truckscenes/
         ├── samples/      # 키프레임 데이터 (이미지, LiDAR 등)
         ├── sweeps/       # 비키프레임 데이터
         ├── v1.1-test/    # 테스트 split metadata JSON
-        └── v1.1-trainval # train+val split metadata JSON
+        └── v1.2-trainval # train+val split metadata JSON
             └── (mini 사용 시 v1.0-mini로 대체)
 ```
 
@@ -86,7 +86,7 @@ Python wrapper(`scripts/`)가 default(dataroot, batch, num_workers, --wandb)를 
 ```bash
 python train.py \
   --dataroot data/man-truckscenes \
-  --version v1.1-trainval \
+  --version v1.2-trainval \
   --batch_size 8 \
   --num_workers 8 \
   --lr 1e-4 \

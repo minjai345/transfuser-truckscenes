@@ -32,7 +32,7 @@ def main():
     p.add_argument("--out_dir", default="viz/curvy", help="출력 폴더")
     p.add_argument("--fps", type=int, default=2)
     p.add_argument("--dataroot", default="data/man-truckscenes")
-    p.add_argument("--version", default="v1.1-trainval")
+    p.add_argument("--version", default="v1.2-trainval")
     args = p.parse_args()
 
     if not CURVY_JSON.exists():

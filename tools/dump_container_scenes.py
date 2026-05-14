@@ -33,7 +33,7 @@ sys.path.insert(0, str(_HERE.parent))
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataroot", type=str, default="data/man-truckscenes")
-    parser.add_argument("--version", type=str, default="v1.1-trainval")
+    parser.add_argument("--version", type=str, default="v1.2-trainval")
     parser.add_argument("--output", type=str,
                         default="data/scene_container_split.json")
     parser.add_argument("--threshold", type=float, default=2.5,
