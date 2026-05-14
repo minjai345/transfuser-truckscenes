@@ -3,6 +3,7 @@ data/
 viz/
 wandb/
 work_dirs/
+work_dirs
 logs/
 
 # Python
